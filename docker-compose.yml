@@ -1,0 +1,13 @@
+services:
+  startgenerate:
+    build: .
+    image: startgenerate-service:latest
+    container_name: startgenerate-service
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      # Bind HANYA ke localhost host -- endpoint ini tidak boleh diakses
+      # dari luar server. Jangan ganti jadi "8082:8082" (itu bind ke
+      # 0.0.0.0 host dan bisa diakses dari luar).
+      - "127.0.0.1:8082:8082"
