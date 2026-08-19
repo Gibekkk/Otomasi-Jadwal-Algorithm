@@ -6,15 +6,11 @@ services:
     restart: unless-stopped
     env_file:
       - .env
-    # PENTING: pakai network host, BUKAN "ports: 127.0.0.1:8082:8082".
-    # MySQL dan Java backend jalan langsung di host (bukan di container
-    # lain), jadi DB_HOST=127.0.0.1 / JAVA_BASE_URL=http://localhost:8080
-    # di .env hanya valid kalau container berbagi network stack host.
-    # Dengan bridge network (ports mapping biasa), 127.0.0.1 di dalam
-    # container menunjuk ke container itu sendiri -> koneksi DB gagal.
-    # Isolasi "local only" tetap terjaga karena gunicorn di-bind ke
-    # 127.0.0.1:8082 (lihat Dockerfile), bukan 0.0.0.0:8082 -- jadi
-    # endpoint tetap tidak bisa diakses dari luar host walau pakai
-    # network host. Note: network_mode host hanya didukung penuh di
-    # Docker Linux (Jenkins agent Linux -> aman).
-    network_mode: "host"
+    ports:
+      - "127.0.0.1:8082:8082"   # local-only tetap terjaga (cuma loopback host)
+    networks:
+      - jadwal-network          # supaya bisa diakses container Java lewat nama container
+
+networks:
+  jadwal-network:
+    external: true

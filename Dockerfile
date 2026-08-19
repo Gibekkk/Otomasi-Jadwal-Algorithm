@@ -14,4 +14,4 @@ COPY app.py .
 # membuat endpoint bisa diakses dari luar host (setara publish 8082:8082).
 EXPOSE 8082
 
-CMD ["gunicorn", "--bind", "127.0.0.1:8082", "--workers", "2", "--timeout", "60", "app:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:8082", "--workers", "2", "--timeout", "60", "app:app"]
