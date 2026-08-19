@@ -7,11 +7,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py .
 
-# Gunicorn dibind ke 0.0.0.0 di DALAM container (wajib, kalau tidak port
-# tidak bisa di-publish sama sekali). Isolasi "local only" dilakukan di
-# LUAR container lewat docker run/compose: publish ke 127.0.0.1:8082 saja
-# (lihat Jenkinsfile / docker run command), bukan 0.0.0.0:8082 -- supaya
-# port TIDAK bisa diakses dari luar host.
+# Container jalan dengan network_mode: host (lihat docker-compose.yml),
+# jadi gunicorn di-bind langsung ke 127.0.0.1 -- persis seperti kalau
+# app.py dijalankan manual tanpa Docker. Ini yang membuat endpoint TIDAK
+# bisa diakses dari luar host. JANGAN ganti ke 0.0.0.0:8082, itu akan
+# membuat endpoint bisa diakses dari luar host (setara publish 8082:8082).
 EXPOSE 8082
 
-CMD ["gunicorn", "--bind", "0.0.0.0:8082", "--workers", "2", "--timeout", "60", "app:app"]
+CMD ["gunicorn", "--bind", "127.0.0.1:8082", "--workers", "2", "--timeout", "60", "app:app"]

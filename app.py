@@ -95,25 +95,13 @@ def rotate_secret_key(conn, free_table_id):
     return new_hashed
 
 
-def login_as_admin():
-    url = f"{JAVA_BASE_URL}{LOGIN_PATH}"
-    response = requests.post(
-        url,
-        json={"username": JAVA_ADMIN_USERNAME, "password": JAVA_ADMIN_PASSWORD},
-        timeout=10,
-    )
-    response.raise_for_status()
-    return response.json()["token"]
-
-
 def notify_generate_complete(new_secret_key):
-    token = login_as_admin()
     url = f"{JAVA_BASE_URL}{GENERATE_COMPLETE_PATH}"
     try:
         response = requests.post(
             url,
             data=new_secret_key,
-            headers={"Token": token, "Content-Type": "text/plain"},
+            headers={"Content-Type": "text/plain"},
             timeout=10,
         )
         logger.info("POST %s -> %s", url, response.status_code)
@@ -131,7 +119,12 @@ def start_generate():
     if not secret_key:
         return jsonify({"message": "secretKey wajib diisi"}), 400
 
-    conn = get_connection()
+    try:
+        conn = get_connection()
+    except pymysql.MySQLError as exc:
+        logger.error("Gagal konek ke database: %s", exc)
+        return jsonify({"message": "Database error", "detail": str(exc)}), 500
+
     try:
         row = find_free_table_by_secret(conn, secret_key)
         if row is None:
