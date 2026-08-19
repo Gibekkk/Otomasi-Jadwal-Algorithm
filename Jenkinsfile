@@ -69,9 +69,12 @@ pipeline {
 set -e
 cd ${env.DEPLOY_DIR}
 
-echo ">>> Membersihkan container, volume, dan image lama di server sebelum redeploy..."
+echo ">>> Membersihkan container & volume lama di server sebelum redeploy..."
 docker compose down --remove-orphans -v || true
-rm -f ${env.IMAGE_NAME}-*.tar.gz || true
+
+echo ">>> Membersihkan tar.gz sisa build sebelumnya (kecuali yang baru saja diupload)..."
+find . -maxdepth 1 -name "${env.IMAGE_NAME}-*.tar.gz" ! -name "${env.IMAGE_TAR}" -delete || true
+
 docker image prune -f || true
 
 echo ">>> Loading image baru..."
