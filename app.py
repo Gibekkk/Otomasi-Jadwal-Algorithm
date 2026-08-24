@@ -74,8 +74,7 @@ def get_connection():
 def find_free_table_by_secret(conn, secret_key):
     with conn.cursor() as cursor:
         cursor.execute(
-            "SELECT id, is_generating, is_odd, academic_year, secret_key, "
-            "timeline_generation_id "
+            "SELECT id, is_generating, secret_key, timeline_generation_id "
             "FROM free_tables WHERE secret_key = %s LIMIT 1",
             (secret_key,),
         )
