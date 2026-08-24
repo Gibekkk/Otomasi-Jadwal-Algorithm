@@ -9,9 +9,12 @@ Alur:
 3. Kalau valid:
    a. Simulasi generate key baru: UUID di-hash (SHA-256), simpan sebagai
       secret_key baru (rotasi, jadi key lama tidak bisa dipakai ulang).
-   b. Sleep GENERATE_SLEEP_SECONDS detik (simulasi proses generate jadwal).
-   c. Login sebagai admin (JAVA_ADMIN_USERNAME/PASSWORD) ke
-      {JAVA_BASE_URL}{API_PREFIX}/auth/login untuk dapat Token sesi.
+   b. Jalankan algoritma generate jadwal sungguhan lewat
+      `algorithm.generate_timeline()` untuk `timeline_generation_id` milik
+      free_table ini (menggantikan simulasi sleep()).
+   c. Kalau generate sukses -> commit transaksi (rotasi key + hasil generate
+      jadi satu transaksi). Kalau gagal -> rollback semuanya (key TIDAK
+      jadi dirotasi, biar caller bisa retry dengan secretKey yang sama).
    d. POST secret_key baru (raw text) ke TimelineController Java backend:
       {JAVA_BASE_URL}{API_PREFIX}/timeline/generateComplete
       dengan header Token, endpoint ini yang men-set is_generating = 0.
@@ -26,13 +29,14 @@ Konfigurasi lewat .env (lihat .env.example).
 import hashlib
 import logging
 import os
-import time
 import uuid
 
 import pymysql
 import requests
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
+
+from algorithm import generate_timeline
 
 load_dotenv()
 
@@ -44,13 +48,7 @@ DB_PASS = os.environ.get("DB_PASS", "")
 
 JAVA_BASE_URL = os.environ.get("JAVA_BASE_URL", "http://localhost:8080")
 API_PREFIX = os.environ.get("API_PREFIX", "/api/v1")
-LOGIN_PATH = f"{API_PREFIX}/auth/login"
 GENERATE_COMPLETE_PATH = f"{API_PREFIX}/timeline/generateComplete"
-
-JAVA_ADMIN_USERNAME = os.environ.get("JAVA_ADMIN_USERNAME", "")
-JAVA_ADMIN_PASSWORD = os.environ.get("JAVA_ADMIN_PASSWORD", "")
-
-GENERATE_SLEEP_SECONDS = int(os.environ.get("GENERATE_SLEEP_SECONDS", "10"))
 
 SERVER_HOST = os.environ.get("SERVER_HOST", "127.0.0.1")  # local only
 SERVER_PORT = int(os.environ.get("SERVER_PORT", "8082"))
@@ -76,7 +74,8 @@ def get_connection():
 def find_free_table_by_secret(conn, secret_key):
     with conn.cursor() as cursor:
         cursor.execute(
-            "SELECT id, is_generating, is_odd, academic_year, secret_key "
+            "SELECT id, is_generating, is_odd, academic_year, secret_key, "
+            "timeline_generation_id "
             "FROM free_tables WHERE secret_key = %s LIMIT 1",
             (secret_key,),
         )
@@ -91,7 +90,6 @@ def rotate_secret_key(conn, free_table_id):
             "UPDATE free_tables SET secret_key = %s WHERE id = %s",
             (new_hashed, free_table_id),
         )
-    conn.commit()
     return new_hashed
 
 
@@ -131,19 +129,37 @@ def start_generate():
             return jsonify({"message": "Secret key tidak valid"}), 401
 
         free_table_id = row["id"]
+        timeline_generation_id = row.get("timeline_generation_id")
         logger.info("Secret key valid, free_table id=%s", free_table_id)
 
-        new_secret = rotate_secret_key(conn, free_table_id)
-        logger.info("Key baru berhasil dibuat dan disimpan (rotasi secret_key)")
+        if not timeline_generation_id:
+            return jsonify({
+                "message": "free_table ini belum terhubung ke timeline_generation"
+            }), 400
 
-        logger.info("Simulasi generate jadwal, sleep %s detik...", GENERATE_SLEEP_SECONDS)
-        time.sleep(GENERATE_SLEEP_SECONDS)
+        new_secret = rotate_secret_key(conn, free_table_id)
+        logger.info("Key baru berhasil dibuat (rotasi secret_key, belum di-commit)")
+
+        try:
+            logger.info(
+                "Menjalankan algoritma generate jadwal untuk timeline_generation_id=%s",
+                timeline_generation_id,
+            )
+            result = generate_timeline(conn, timeline_generation_id, commit=True)
+            conn.commit()
+            logger.info("Generate selesai: %s", result.as_dict())
+        except Exception as exc:  # noqa: BLE001 - mau tangkap semua error algoritma
+            conn.rollback()
+            logger.error("Gagal generate jadwal: %s", exc)
+            return jsonify({"message": "Gagal generate jadwal", "detail": str(exc)}), 500
 
         callback_status = notify_generate_complete(new_secret)
 
         return jsonify({
             "message": "Generate selesai",
             "freeTableId": free_table_id,
+            "timelineGenerationId": timeline_generation_id,
+            "generateResult": result.as_dict(),
             "generateCompleteStatus": callback_status,
         }), 200
     except pymysql.MySQLError as exc:
