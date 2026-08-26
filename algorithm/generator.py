@@ -25,7 +25,7 @@ from typing import List
 import pymysql
 
 from . import config as cfg
-from .matching import build_candidates
+from .matching import build_candidates, theory_and_lab_slots
 from .models import GenerationStats, PlannedSession
 from .repository import Repository
 from .scheduler import schedule_course
@@ -135,6 +135,23 @@ def generate_timeline(
                 stats.issues.append(
                     f"course '{course.name}' ({course.id}) split {m}: blok lab tidak dapat ruang sama sekali"
                 )
+
+        # --- catat split yang porsi teorinya tidak lengkap (sebagian
+        # periode tidak dapat slot ruang sama sekali, termasuk lewat
+        # force-placement) -- ini catatan level-course, TIDAK dipakai
+        # sebagai fallback_reason per lecture (yang sudah benar hanya
+        # nempel di porsi yang memang tidak dapat dosen ter-verifikasi). ---
+        theory_needed, _lab_needed = theory_and_lab_slots(course)
+        if theory_needed > 0:
+            for split in splits_seen:
+                theory_count = sum(
+                    1 for s in sessions if s.course_index == split and not s.is_lab_block
+                )
+                if theory_count < theory_needed:
+                    stats.issues.append(
+                        f"course '{course.name}' ({course.id}) split {split}: sesi teori tidak lengkap "
+                        f"({theory_count}/{theory_needed} periode dapat ruang)"
+                    )
 
     stats.total_sessions = len(all_sessions)
 
