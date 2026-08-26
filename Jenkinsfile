@@ -4,7 +4,7 @@ pipeline {
         IMAGE_NAME    = 'startgenerate-service'
         IMAGE_TAG     = "${env.BUILD_NUMBER}"
         DEPLOY_DIR    = '/opt/jadwal/startgenerate-service'
-        HOST_IP       = '103.185.52.80'
+        HOST_IP       = 'host.docker.internal'
         HOST_USER     = 'root'
         IMAGE_TAR     = "${IMAGE_NAME}-${IMAGE_TAG}.tar.gz"
         REMOTE_SCRIPT = 'deploy_remote.sh'
