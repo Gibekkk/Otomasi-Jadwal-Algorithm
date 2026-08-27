@@ -123,6 +123,7 @@ class PlannedSession:
     period_id: str
     room_id: str
     is_lab_block: bool = False
+    sks_count: int = 0
     lecturer_assignments: List[LecturerAssignment] = field(default_factory=list)
 
 

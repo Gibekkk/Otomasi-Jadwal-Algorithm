@@ -82,7 +82,7 @@ class Repository:
         with self.conn.cursor() as cur:
             cur.execute(
                 "SELECT id, name, category_id, is_active, is_interdiscipline "
-                "FROM lecturers WHERE is_active = 1"
+                "FROM lecturers WHERE is_active = 1 AND deleted_at IS NULL"
             )
             lecturer_rows = cur.fetchall()
 
@@ -152,7 +152,7 @@ class Repository:
             cur.execute(
                 "SELECT id, name, capacity, sks_count, lecturer_count, is_lab, is_odd, "
                 "is_active, is_interdiscipline, category_id "
-                "FROM courses WHERE is_active = 1 AND is_odd = %s",
+                "FROM courses WHERE is_active = 1 AND is_odd = %s AND deleted_at IS NULL",
                 (1 if is_odd else 0,),
             )
             course_rows = cur.fetchall()
@@ -227,6 +227,8 @@ class Repository:
                     session.course_id,
                     session.room_id,
                     session.period_id,
+                    session.sks_count,
+                    session.is_lab_block,
                 )
             )
             for assignment in session.lecturer_assignments:
@@ -244,8 +246,8 @@ class Repository:
             if course_schedule_rows:
                 cur.executemany(
                     "INSERT INTO course_schedules "
-                    "(id, course_index, day, name, course_id, room_id, schedule_id) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    "(id, course_index, day, name, course_id, room_id, schedule_id, sks_count, is_lab) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
                     course_schedule_rows,
                 )
             if lecture_rows:
