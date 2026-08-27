@@ -3,7 +3,7 @@ pipeline {
     environment {
         IMAGE_NAME    = 'startgenerate-service'
         IMAGE_TAG     = "${env.BUILD_NUMBER}"
-        DEPLOY_DIR    = '/opt/jadwal/startgenerate-service'
+        DEPLOY_DIR    = '/home/bob9/jadwal/startgenerate-service'
         HOST_IP       = '172.17.0.1'
         HOST_USER     = 'root'
         IMAGE_TAR     = "${IMAGE_NAME}-${IMAGE_TAG}.tar.gz"
