@@ -161,9 +161,10 @@ def generate_timeline(
             repo.clear_previous_generation(timeline_generation_id)
         persisted = repo.persist(timeline_generation_id, all_sessions)
         logger.info(
-            "Generate selesai & disimpan: %d course_schedules, %d lectures",
+            "Generate selesai & disimpan: %d course_schedules, %d lectures, %d lecture_lecturers",
             persisted.get("course_schedules_inserted", 0),
             persisted.get("lectures_inserted", 0),
+            persisted.get("lecture_lecturers_inserted", 0),
         )
     else:
         logger.info("Dry-run (commit=False): %d session dihitung, tidak ditulis ke DB", len(all_sessions))

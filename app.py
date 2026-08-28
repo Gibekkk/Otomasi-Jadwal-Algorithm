@@ -7,17 +7,25 @@ Alur:
 1. Terima secretKey dari body request (JSON).
 2. Validasi secretKey terhadap kolom `secret_key` di tabel `free_tables`.
 3. Kalau valid:
-   a. Simulasi generate key baru: UUID di-hash (SHA-256), simpan sebagai
-      secret_key baru (rotasi, jadi key lama tidak bisa dipakai ulang).
+   a. Rotasi secret_key (UUID di-hash SHA-256) DAN COMMIT SEKARANG JUGA,
+      SEBELUM algoritma generate jalan -- bukan dibundel dengan commit
+      hasil generate di akhir. secretKey lama langsung invalid begitu
+      generate dimulai (bukan baru setelah generate, yang bisa berjalan
+      lama, selesai).
    b. Jalankan algoritma generate jadwal sungguhan lewat
       `algorithm.generate_timeline()` untuk `timeline_generation_id` milik
-      free_table ini (menggantikan simulasi sleep()).
-   c. Kalau generate sukses -> commit transaksi (rotasi key + hasil generate
-      jadi satu transaksi). Kalau gagal -> rollback semuanya (key TIDAK
-      jadi dirotasi, biar caller bisa retry dengan secretKey yang sama).
-   d. POST secret_key baru (raw text) ke TimelineController Java backend:
+      free_table ini.
+   c. Kalau generate sukses -> commit transaksi generate, lalu POST
+      secret_key baru (raw text) ke TimelineController Java backend:
       {JAVA_BASE_URL}{API_PREFIX}/timeline/generateComplete
       dengan header Token, endpoint ini yang men-set is_generating = 0.
+   d. Kalau generate GAGAL (exception apa pun) -> rollback perubahan
+      algoritma (secret_key yang sudah dirotasi di langkah (a) TETAP
+      dirotasi, tidak ikut rollback karena sudah di-commit terpisah), lalu
+      POST ke {JAVA_BASE_URL}{API_PREFIX}/timeline/stopGenerate supaya
+      backend tahu proses berhenti dan bisa reset is_generating alih-alih
+      stuck. Endpoint & payload stopGenerate ini masih ASUMSI -- sesuaikan
+      dengan TimelineController Java yang sebenarnya kalau berbeda.
 4. Kalau tidak valid -> 401.
 
 Catatan: kolom `secret_key` (VARCHAR) harus ada di tabel `free_tables`, dan
@@ -49,6 +57,10 @@ DB_PASS = os.environ.get("DB_PASS", "")
 JAVA_BASE_URL = os.environ.get("JAVA_BASE_URL", "http://localhost:8080")
 API_PREFIX = os.environ.get("API_PREFIX", "/api/v1")
 GENERATE_COMPLETE_PATH = f"{API_PREFIX}/timeline/generateComplete"
+# NOTE: endpoint & payload di bawah ini ASUMSI (belum ada di spesifikasi
+# awal) -- kalau TimelineController Java kamu pakai path/kontrak beda,
+# sesuaikan GENERATE_STOP_PATH & body JSON di notify_generate_stopped().
+GENERATE_STOP_PATH = os.environ.get("GENERATE_STOP_PATH", f"{API_PREFIX}/timeline/stopGenerate")
 
 SERVER_HOST = os.environ.get("SERVER_HOST", "127.0.0.1")  # local only
 SERVER_PORT = int(os.environ.get("SERVER_PORT", "8082"))
@@ -108,6 +120,35 @@ def notify_generate_complete(new_secret_key):
         return None
 
 
+def notify_generate_stopped(free_table_id, timeline_generation_id, secret_key, error_detail):
+    """Beri tahu backend Java kalau proses generate BERHENTI/GAGAL (exception
+    apa pun setelah kita tahu free_table/timeline mana yang terlibat),
+    supaya backend bisa reset status `is_generating` alih-alih stuck
+    seakan-akan masih generate padahal prosesnya sudah mati."""
+    if free_table_id is None and timeline_generation_id is None:
+        # Belum sempat tahu free_table/timeline mana yang terlibat (mis.
+        # gagal sebelum secretKey divalidasi) -- tidak ada yang bisa
+        # diberitahu ke backend.
+        return None
+    url = f"{JAVA_BASE_URL}{GENERATE_STOP_PATH}"
+    try:
+        response = requests.post(
+            url,
+            json={
+                "freeTableId": free_table_id,
+                "timelineGenerationId": timeline_generation_id,
+                "secretKey": secret_key,
+                "error": error_detail,
+            },
+            timeout=10,
+        )
+        logger.info("POST %s -> %s", url, response.status_code)
+        return response.status_code
+    except requests.RequestException as exc:
+        logger.error("Gagal fetch %s: %s", url, exc)
+        return None
+
+
 @app.post("/startGenerate")
 def start_generate():
     body = request.get_json(silent=True) or {}
@@ -121,6 +162,10 @@ def start_generate():
     except pymysql.MySQLError as exc:
         logger.error("Gagal konek ke database: %s", exc)
         return jsonify({"message": "Database error", "detail": str(exc)}), 500
+
+    free_table_id = None
+    timeline_generation_id = None
+    new_secret = None
 
     try:
         row = find_free_table_by_secret(conn, secret_key)
@@ -136,21 +181,26 @@ def start_generate():
                 "message": "free_table ini belum terhubung ke timeline_generation"
             }), 400
 
+        # Rotasi secret key & COMMIT SEKARANG (di awal, SEBELUM algoritma
+        # generate jalan) -- bukan dibundel dengan commit hasil generate di
+        # akhir seperti sebelumnya. Efeknya: secretKey lama langsung tidak
+        # valid begitu generate DIMULAI, bukan baru setelah generate (yang
+        # bisa berjalan lama) selesai -- caller lain tidak bisa numpang
+        # start generate lagi pakai secretKey yang sama selagi proses masih
+        # jalan. Konsekuensinya, kalau generate di bawah gagal, secretKey
+        # LAMA tidak bisa dipakai retry lagi -- pakai `new_secret` (lihat
+        # notify_generate_stopped) untuk retry.
         new_secret = rotate_secret_key(conn, free_table_id)
-        logger.info("Key baru berhasil dibuat (rotasi secret_key, belum di-commit)")
+        conn.commit()
+        logger.info("Secret key dirotasi & di-commit di awal (sebelum generate jalan)")
 
-        try:
-            logger.info(
-                "Menjalankan algoritma generate jadwal untuk timeline_generation_id=%s",
-                timeline_generation_id,
-            )
-            result = generate_timeline(conn, timeline_generation_id, commit=True)
-            conn.commit()
-            logger.info("Generate selesai: %s", result.as_dict())
-        except Exception as exc:  # noqa: BLE001 - mau tangkap semua error algoritma
-            conn.rollback()
-            logger.error("Gagal generate jadwal: %s", exc)
-            return jsonify({"message": "Gagal generate jadwal", "detail": str(exc)}), 500
+        logger.info(
+            "Menjalankan algoritma generate jadwal untuk timeline_generation_id=%s",
+            timeline_generation_id,
+        )
+        result = generate_timeline(conn, timeline_generation_id, commit=True)
+        conn.commit()
+        logger.info("Generate selesai: %s", result.as_dict())
 
         callback_status = notify_generate_complete(new_secret)
 
@@ -161,9 +211,25 @@ def start_generate():
             "generateResult": result.as_dict(),
             "generateCompleteStatus": callback_status,
         }), 200
+
     except pymysql.MySQLError as exc:
+        conn.rollback()
         logger.error("Database error: %s", exc)
-        return jsonify({"message": "Database error", "detail": str(exc)}), 500
+        stop_status = notify_generate_stopped(free_table_id, timeline_generation_id, new_secret, str(exc))
+        return jsonify({
+            "message": "Database error",
+            "detail": str(exc),
+            "generateStoppedStatus": stop_status,
+        }), 500
+    except Exception as exc:  # noqa: BLE001 - mau tangkap SEMUA error algoritma/lainnya
+        conn.rollback()
+        logger.error("Gagal generate jadwal: %s", exc)
+        stop_status = notify_generate_stopped(free_table_id, timeline_generation_id, new_secret, str(exc))
+        return jsonify({
+            "message": "Gagal generate jadwal",
+            "detail": str(exc),
+            "generateStoppedStatus": stop_status,
+        }), 500
     finally:
         conn.close()
 

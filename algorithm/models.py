@@ -103,7 +103,12 @@ class Course:
 
 @dataclass
 class LecturerAssignment:
-    """Satu dosen yang mengajar di satu PlannedSession -> 1 baris `lectures`."""
+    """Satu dosen yang mengajar di satu PlannedSession -> 1 baris
+    `lecture_lecturers` (role_index=0 -> is_main_lecturer=True). Kalau
+    lecturer_id None (tidak ketemu kandidat), tidak ada baris
+    lecture_lecturers yang dibuat untuk assignment ini -- fallback_reason
+    tetap disimpan di sini untuk dipakai sebagai `lectures.fallback_reason`
+    kalau assignment ini adalah dosen utama (role_index=0)."""
 
     role_index: int  # 0 = dosen utama, 1..N-1 = co-lecturer
     lecturer_id: Optional[str] = None
@@ -113,8 +118,9 @@ class LecturerAssignment:
 @dataclass
 class PlannedSession:
     """Satu kombinasi (course_index, day, period, room) -> 1 baris
-    `course_schedules`, plus daftar dosen yang mengajar di situ (masing2
-    jadi 1 baris `lectures` yang menunjuk ke course_schedule yang sama)."""
+    `course_schedules` + TEPAT 1 baris `lectures`, plus daftar dosen yang
+    mengajar di situ (masing2 jadi 1 baris `lecture_lecturers` yang
+    menunjuk ke lecture yang sama, ditandai is_main_lecturer)."""
 
     course_id: str
     course_name: str
@@ -123,6 +129,7 @@ class PlannedSession:
     period_id: str
     room_id: str
     is_lab_block: bool = False
+    sks_count: int = 0
     lecturer_assignments: List[LecturerAssignment] = field(default_factory=list)
 
 

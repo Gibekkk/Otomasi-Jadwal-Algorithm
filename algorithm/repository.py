@@ -82,11 +82,16 @@ class Repository:
         with self.conn.cursor() as cur:
             cur.execute(
                 "SELECT id, name, category_id, is_active, is_interdiscipline "
-                "FROM lecturers WHERE is_active = 1"
+                "FROM lecturers WHERE is_active = 1 AND deleted_at IS NULL"
             )
             lecturer_rows = cur.fetchall()
 
-            cur.execute("SELECT lecturer_id, specialization_id FROM lecturer_specializations")
+            cur.execute(
+                "SELECT ls.lecturer_id, ls.specialization_id "
+                "FROM lecturer_specializations ls "
+                "JOIN specializations s ON s.id = ls.specialization_id "
+                "WHERE s.deleted_at IS NULL"
+            )
             spec_rows = cur.fetchall()
 
             cur.execute("SELECT lecturer_id, schedule_id FROM lecturer_schedules")
@@ -121,10 +126,21 @@ class Repository:
 
     def load_rooms(self) -> List[Room]:
         with self.conn.cursor() as cur:
-            cur.execute("SELECT id, name, capacity, lab_group_id FROM rooms")
+            cur.execute(
+                "SELECT r.id, r.name, r.capacity, r.lab_group_id "
+                "FROM rooms r "
+                "LEFT JOIN lab_groups lg ON lg.id = r.lab_group_id AND lg.deleted_at IS NULL "
+                "WHERE r.deleted_at IS NULL "
+                "AND (r.lab_group_id IS NULL OR lg.id IS NOT NULL)"
+            )
             room_rows = cur.fetchall()
 
-            cur.execute("SELECT lab_group_id, specialization_id FROM lab_specializations")
+            cur.execute(
+                "SELECT ls.lab_group_id, ls.specialization_id "
+                "FROM lab_specializations ls "
+                "JOIN lab_groups lg ON lg.id = ls.lab_group_id AND lg.deleted_at IS NULL "
+                "JOIN specializations s ON s.id = ls.specialization_id AND s.deleted_at IS NULL"
+            )
             lab_spec_rows = cur.fetchall()
 
         specs_by_lab_group: Dict[str, set] = {}
@@ -152,12 +168,17 @@ class Repository:
             cur.execute(
                 "SELECT id, name, capacity, sks_count, lecturer_count, is_lab, is_odd, "
                 "is_active, is_interdiscipline, category_id "
-                "FROM courses WHERE is_active = 1 AND is_odd = %s",
+                "FROM courses WHERE is_active = 1 AND is_odd = %s AND deleted_at IS NULL",
                 (1 if is_odd else 0,),
             )
             course_rows = cur.fetchall()
 
-            cur.execute("SELECT course_id, specialization_id FROM course_specializations")
+            cur.execute(
+                "SELECT cs.course_id, cs.specialization_id "
+                "FROM course_specializations cs "
+                "JOIN specializations s ON s.id = cs.specialization_id "
+                "WHERE s.deleted_at IS NULL"
+            )
             spec_rows = cur.fetchall()
 
         specs_by_course: Dict[str, set] = {}
@@ -187,16 +208,27 @@ class Repository:
     # WRITE
     # ------------------------------------------------------------------
     def clear_previous_generation(self, timeline_generation_id: str) -> None:
-        """Hapus lectures + course_schedules milik timeline_generation ini
-        kalau sebelumnya sudah pernah generate (mis. retry). course_schedules
-        dihapus lewat lectures dulu (FK), baru course_schedules yang sudah
-        tidak dipakai lecture manapun."""
+        """Hapus lecture_lecturers + lectures + course_schedules milik
+        timeline_generation ini kalau sebelumnya sudah pernah generate
+        (mis. retry). Urutan hapus WAJIB ikut arah FK (tidak ada ON DELETE
+        CASCADE di skema): lecture_lecturers dulu (FK ke lectures), baru
+        lectures, baru course_schedules yang sudah tidak dipakai lecture
+        manapun."""
         with self.conn.cursor() as cur:
             cur.execute(
-                "SELECT DISTINCT course_schedule_id FROM lectures WHERE timeline_generation_id = %s",
+                "SELECT id, course_schedule_id FROM lectures WHERE timeline_generation_id = %s",
                 (timeline_generation_id,),
             )
-            old_course_schedule_ids = [r["course_schedule_id"] for r in cur.fetchall()]
+            old_rows = cur.fetchall()
+            old_lecture_ids = [r["id"] for r in old_rows]
+            old_course_schedule_ids = list({r["course_schedule_id"] for r in old_rows})
+
+            if old_lecture_ids:
+                placeholders = ",".join(["%s"] * len(old_lecture_ids))
+                cur.execute(
+                    f"DELETE FROM lecture_lecturers WHERE lecture_id IN ({placeholders})",
+                    old_lecture_ids,
+                )
 
             cur.execute("DELETE FROM lectures WHERE timeline_generation_id = %s", (timeline_generation_id,))
 
@@ -209,11 +241,28 @@ class Repository:
                 )
 
     def persist(self, timeline_generation_id: str, sessions: Sequence[PlannedSession]) -> dict:
-        """Simpan semua PlannedSession jadi baris course_schedules + lectures.
-        Dipanggil di dalam transaksi yang sama dengan koneksi yang dipakai
-        endpoint /startGenerate (caller yang commit/rollback)."""
+        """Simpan semua PlannedSession jadi baris course_schedules + lectures
+        + lecture_lecturers. Dipanggil di dalam transaksi yang sama dengan
+        koneksi yang dipakai endpoint /startGenerate (caller yang
+        commit/rollback).
+
+        Skema baru: `lectures` TIDAK punya kolom lecturer_id lagi -- 1
+        PlannedSession -> TEPAT 1 baris `lectures` (mewakili sesi kelas itu
+        sendiri), dan tiap dosen yang mengajar di situ (utama + co-lecturer)
+        jadi 1 baris `lecture_lecturers` yang menunjuk ke lectures row yang
+        sama, ditandai `is_main_lecturer`. Assignment yang lecturer_id-nya
+        None (tidak ketemu kandidat sama sekali) tidak punya dosen valid
+        untuk dicatat, jadi tidak menghasilkan baris lecture_lecturers.
+
+        `lectures.fallback_reason` diisi dari status dosen UTAMA
+        (role_index=0) saja -- sesuai aturan hanya dosen utama yang wajib
+        bebas-bentrok (co-lecturer boleh bentrok, lihat
+        cfg.CHECK_CONFLICT_FOR_PRIMARY_ONLY), jadi cuma fallback dosen utama
+        yang relevan dicatat di level sesi/lecture.
+        """
         course_schedule_rows = []
         lecture_rows = []
+        lecture_lecturer_rows = []
 
         for session in sessions:
             course_schedule_id = new_id()
@@ -227,16 +276,34 @@ class Repository:
                     session.course_id,
                     session.room_id,
                     session.period_id,
+                    session.sks_count,
+                    session.is_lab_block,
                 )
             )
+
+            lecture_id = new_id()
+            primary_assignment = next(
+                (a for a in session.lecturer_assignments if a.role_index == 0), None
+            )
+            lecture_fallback_reason = primary_assignment.fallback_reason if primary_assignment else None
+            lecture_rows.append(
+                (
+                    lecture_id,
+                    lecture_fallback_reason,
+                    course_schedule_id,
+                    timeline_generation_id,
+                )
+            )
+
             for assignment in session.lecturer_assignments:
-                lecture_rows.append(
+                if assignment.lecturer_id is None:
+                    continue
+                lecture_lecturer_rows.append(
                     (
                         new_id(),
-                        assignment.fallback_reason,
-                        course_schedule_id,
+                        assignment.role_index == 0,
+                        lecture_id,
                         assignment.lecturer_id,
-                        timeline_generation_id,
                     )
                 )
 
@@ -244,19 +311,27 @@ class Repository:
             if course_schedule_rows:
                 cur.executemany(
                     "INSERT INTO course_schedules "
-                    "(id, course_index, day, name, course_id, room_id, schedule_id) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    "(id, course_index, day, name, course_id, room_id, schedule_id, sks_count, is_lab) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
                     course_schedule_rows,
                 )
             if lecture_rows:
                 cur.executemany(
                     "INSERT INTO lectures "
-                    "(id, fallback_reason, course_schedule_id, lecturer_id, timeline_generation_id) "
-                    "VALUES (%s, %s, %s, %s, %s)",
+                    "(id, fallback_reason, course_schedule_id, timeline_generation_id) "
+                    "VALUES (%s, %s, %s, %s)",
                     lecture_rows,
+                )
+            if lecture_lecturer_rows:
+                cur.executemany(
+                    "INSERT INTO lecture_lecturers "
+                    "(id, is_main_lecturer, lecture_id, lecturer_id) "
+                    "VALUES (%s, %s, %s, %s)",
+                    lecture_lecturer_rows,
                 )
 
         return {
             "course_schedules_inserted": len(course_schedule_rows),
             "lectures_inserted": len(lecture_rows),
+            "lecture_lecturers_inserted": len(lecture_lecturer_rows),
         }
