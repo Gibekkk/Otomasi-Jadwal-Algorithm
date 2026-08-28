@@ -131,7 +131,12 @@ def test_partial_theory_keeps_real_lecturer_on_scheduled_periods():
     day_order = ["MONDAY", "TUESDAY"]
 
     sessions = schedule_course(course, [lecturer], rooms, periods, day_order)
-    assert len(sessions) == 3
+    # 1 chunk (blok periode kontigu/hari) = 1 course_schedule. sks=3 masuk
+    # PRIORITIZE_DAY_SPLIT_FOR_SKS (cap ceil(3/2)=2/hari), jadi kepecah
+    # jadi chunk 2 (Monday) + 1 (Tuesday) = 2 course_schedule, total
+    # sks_count = 3.
+    assert len(sessions) == 2, f"harus 2 course_schedule (chunk 2+1 hari), dapat {len(sessions)}"
+    assert sum(s.sks_count for s in sessions) == 3
     for s in sessions:
         a = s.lecturer_assignments[0]
         assert a.lecturer_id == "FT1"

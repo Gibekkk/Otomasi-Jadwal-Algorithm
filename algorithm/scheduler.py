@@ -372,63 +372,68 @@ def schedule_one_split(
     sessions: List[PlannedSession] = []
 
     # Sesi teori yang dapat dosen asli, bebas-bentrok -> TIDAK ada fallback.
+    # PENTING: 1 chunk (periode kontigu hasil alokasi 1 hari) -> TEPAT 1
+    # PlannedSession -> 1 baris course_schedules. `period_id` diisi periode
+    # PERTAMA di chunk (titik mulai blok), dan `sks_count` menandakan
+    # berapa banyak periode berturut-turut yang dicakup blok itu (dipakai
+    # di sisi lain untuk menghitung end_time sebenarnya) -- BUKAN membuat
+    # 1 course_schedule terpisah untuk tiap periode di dalam chunk yang
+    # sama.
     for chunk in theory_chunks:
-        for p in chunk["periods"]:
-            session = PlannedSession(
-                course_id=course.id,
-                course_name=course.name,
-                course_index=course_index,
-                day=chunk["day"],
-                period_id=p.id,
-                room_id=chunk["room"].id,
-                is_lab_block=False,
-                sks_count=chunk["sks_count"],
-            )
-            session.lecturer_assignments.append(
-                LecturerAssignment(role_index=0, lecturer_id=primary.id, fallback_reason=None)
-            )
-            session.lecturer_assignments.extend(extra_lecturers)
-            sessions.append(session)
+        session = PlannedSession(
+            course_id=course.id,
+            course_name=course.name,
+            course_index=course_index,
+            day=chunk["day"],
+            period_id=chunk["periods"][0].id,
+            room_id=chunk["room"].id,
+            is_lab_block=False,
+            sks_count=chunk["sks_count"],
+        )
+        session.lecturer_assignments.append(
+            LecturerAssignment(role_index=0, lecturer_id=primary.id, fallback_reason=None)
+        )
+        session.lecturer_assignments.extend(extra_lecturers)
+        sessions.append(session)
 
     # Sesi teori hasil paksa (dosen tidak ter-verifikasi bebas-bentrok)
-    # -> lecturer_id None + fallback_reason.
+    # -> lecturer_id None + fallback_reason. Sama seperti di atas: 1 chunk
+    # -> 1 PlannedSession, period_id = periode pertama di chunk.
     for chunk in theory_forced_chunks:
-        for p in chunk["periods"]:
-            session = PlannedSession(
-                course_id=course.id,
-                course_name=course.name,
-                course_index=course_index,
-                day=chunk["day"],
-                period_id=p.id,
-                room_id=chunk["room"].id,
-                is_lab_block=False,
-                sks_count=chunk["sks_count"],
-            )
-            session.lecturer_assignments.append(
-                LecturerAssignment(role_index=0, lecturer_id=None, fallback_reason=theory_forced_reason)
-            )
-            session.lecturer_assignments.extend(extra_lecturers)
-            sessions.append(session)
+        session = PlannedSession(
+            course_id=course.id,
+            course_name=course.name,
+            course_index=course_index,
+            day=chunk["day"],
+            period_id=chunk["periods"][0].id,
+            room_id=chunk["room"].id,
+            is_lab_block=False,
+            sks_count=chunk["sks_count"],
+        )
+        session.lecturer_assignments.append(
+            LecturerAssignment(role_index=0, lecturer_id=None, fallback_reason=theory_forced_reason)
+        )
+        session.lecturer_assignments.extend(extra_lecturers)
+        sessions.append(session)
 
     if course.is_lab and lab_chunk:
         lab_lecturer_id = primary.id if (primary is not None and not lab_forced) else None
         lab_reason = None if lab_lecturer_id is not None else lab_forced_reason
-        for p in lab_chunk["periods"]:
-            session = PlannedSession(
-                course_id=course.id,
-                course_name=course.name,
-                course_index=course_index,
-                day=lab_chunk["day"],
-                period_id=p.id,
-                room_id=lab_chunk["room"].id,
-                is_lab_block=True,
-                sks_count=lab_chunk["sks_count"],
-            )
-            session.lecturer_assignments.append(
-                LecturerAssignment(role_index=0, lecturer_id=lab_lecturer_id, fallback_reason=lab_reason)
-            )
-            session.lecturer_assignments.extend(extra_lecturers)
-            sessions.append(session)
+        session = PlannedSession(
+            course_id=course.id,
+            course_name=course.name,
+            course_index=course_index,
+            day=lab_chunk["day"],
+            period_id=lab_chunk["periods"][0].id,
+            room_id=lab_chunk["room"].id,
+            is_lab_block=True,
+            sks_count=lab_chunk["sks_count"],
+        )
+        session.lecturer_assignments.append(
+            LecturerAssignment(role_index=0, lecturer_id=lab_lecturer_id, fallback_reason=lab_reason)
+        )
+        session.lecturer_assignments.extend(extra_lecturers)
+        sessions.append(session)
         # kalau lab_chunk None: blok lab benar2 tidak dapat ruang/slot sama
         # sekali (bahkan force-placement gagal, misal tidak ada ruang lab
         # sama sekali yang muat di hari manapun) -- tidak ada course_schedule

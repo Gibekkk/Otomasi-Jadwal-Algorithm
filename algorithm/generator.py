@@ -144,8 +144,13 @@ def generate_timeline(
         theory_needed, _lab_needed = theory_and_lab_slots(course)
         if theory_needed > 0:
             for split in splits_seen:
+                # NOTE: sejak 1 chunk (blok periode kontigu) = 1
+                # PlannedSession, jumlah periode teori yang benar2 dapat
+                # slot dihitung dari SUM `sks_count` tiap sesi teori
+                # (bukan jumlah sesi teori itu sendiri, karena 1 sesi
+                # sekarang bisa mewakili beberapa periode sekaligus).
                 theory_count = sum(
-                    1 for s in sessions if s.course_index == split and not s.is_lab_block
+                    s.sks_count for s in sessions if s.course_index == split and not s.is_lab_block
                 )
                 if theory_count < theory_needed:
                     stats.issues.append(

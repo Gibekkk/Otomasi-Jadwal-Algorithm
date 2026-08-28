@@ -172,21 +172,31 @@ def run():
 
     # --- assertions ---
 
-    # C1: course biasa sks=3, harus dapat persis 3 course_schedule (1 split, non-lab)
+    # C1: course biasa sks=3. Sejak 1 chunk (blok periode kontigu/hari) = 1
+    # course_schedule, dan sks=3 termasuk PRIORITIZE_DAY_SPLIT_FOR_SKS
+    # (dibatasi maks ceil(3/2)=2 periode/hari), C1 harus kepecah jadi 2
+    # course_schedule (2 periode di hari pertama + 1 periode di hari
+    # berikutnya) -- BUKAN 3 course_schedule identik (1 per periode).
     c1_sessions = [s for s in all_sessions if s.course_id == "C1"]
-    assert len(c1_sessions) == 3, f"C1 harus 3 sesi (sks=3), dapat {len(c1_sessions)}"
+    assert len(c1_sessions) == 2, f"C1 harus 2 course_schedule (chunk 2+1 hari), dapat {len(c1_sessions)}"
+    assert sum(s.sks_count for s in c1_sessions) == 3, (
+        f"total sks_count C1 di semua course_schedule harus 3, dapat {sum(s.sks_count for s in c1_sessions)}"
+    )
     assert all(not s.is_lab_block for s in c1_sessions)
     assert all(a.lecturer_id is not None for s in c1_sessions for a in s.lecturer_assignments), (
         "C1 harus dapat dosen (FT1 cocok spesialisasi backend)"
     )
 
-    # C2: course lab sks=4 -> teori 3 periode + lab blok 3 periode = 6 sesi
+    # C2: course lab sks=4 -> teori 3 periode (kepecah 2+1 hari krn day-split
+    # cap sks=3) + 1 blok lab kontigu sks_count=3 -> total 3 course_schedule
+    # (2 teori + 1 lab), BUKAN 6 course_schedule 1-per-periode.
     c2_sessions = [s for s in all_sessions if s.course_id == "C2"]
     lab_blocks = [s for s in c2_sessions if s.is_lab_block]
     theory_blocks = [s for s in c2_sessions if not s.is_lab_block]
-    assert len(theory_blocks) == 3, f"C2 teori harus 3 periode, dapat {len(theory_blocks)}"
-    assert len(lab_blocks) == 3, f"C2 lab harus 3 periode (LAB_BLOCK_SKS_EQUIVALENT), dapat {len(lab_blocks)}"
-    assert all(s.room_id == lab_blocks[0].room_id for s in lab_blocks), "blok lab harus 1 ruang yg sama"
+    assert len(theory_blocks) == 2, f"C2 teori harus 2 course_schedule (chunk 2+1 hari), dapat {len(theory_blocks)}"
+    assert sum(s.sks_count for s in theory_blocks) == 3, "total sks_count teori C2 harus 3"
+    assert len(lab_blocks) == 1, f"C2 lab harus 1 course_schedule kontigu (sks_count=3), dapat {len(lab_blocks)}"
+    assert lab_blocks[0].sks_count == 3, "sks_count blok lab C2 harus 3 (LAB_BLOCK_SKS_EQUIVALENT)"
     lab_room = next(r for r in rooms if r.id == lab_blocks[0].room_id)
     assert lab_room.is_lab and SPEC_NETWORK in lab_room.lab_specialization_ids, (
         "ruang lab yg dipilih harus match spesialisasi course (jaringan)"

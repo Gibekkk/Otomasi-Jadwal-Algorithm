@@ -51,9 +51,18 @@ def test_day_overflow_splits_across_days_same_lecturer():
     rooms = [Room(id="R1", name="R1", capacity=20)]
 
     sessions = schedule_course(course, [lecturer], rooms, periods, cfg.DAY_ORDER)
-    assert len(sessions) == 5, f"harus 5 sesi (sks=5), dapat {len(sessions)}"
+    # 1 chunk (blok periode kontigu per hari) = 1 sesi/course_schedule.
+    # Dengan 2 periode/hari, sks=5 kepecah jadi chunk 2+2+1 = 3 sesi,
+    # dan total sks_count di semua sesi harus tetap 5.
     days_used = sorted({s.day for s in sessions})
     assert len(days_used) >= 3, f"dengan 2 periode/hari, sks=5 harus dipecah ke >=3 hari, dapat {days_used}"
+    assert len(sessions) == len(days_used), (
+        f"tiap hari harus jadi TEPAT 1 course_schedule (bukan 1 per periode), "
+        f"dapat {len(sessions)} sesi utk {len(days_used)} hari"
+    )
+    assert sum(s.sks_count for s in sessions) == 5, (
+        f"total sks_count di semua sesi harus 5, dapat {sum(s.sks_count for s in sessions)}"
+    )
     lecturer_ids = {a.lecturer_id for s in sessions for a in s.lecturer_assignments}
     assert lecturer_ids == {"FT1"}, "harus dosen yg SAMA di semua hari"
     print(f"OK: course sks=5 dgn 2 periode/hari terpecah ke hari: {days_used}, dosen tetap sama")
@@ -73,7 +82,10 @@ def test_co_teaching_lecturer_count():
 
     candidates = build_candidates(course, {"FT1": l1, "FT2": l2})
     sessions = schedule_course(course, candidates, rooms, periods, cfg.DAY_ORDER)
-    assert len(sessions) == 2
+    # sks=2, 4 periode tersedia di hari yg sama -> harus jadi 1
+    # course_schedule dengan sks_count=2 (bukan 2 course_schedule terpisah).
+    assert len(sessions) == 1
+    assert sessions[0].sks_count == 2
     for s in sessions:
         assert len(s.lecturer_assignments) == 2, "tiap sesi harus ada 2 dosen (lecturer_count=2)"
         roles = {a.role_index for a in s.lecturer_assignments}
