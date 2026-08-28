@@ -339,6 +339,7 @@ def schedule_one_split(
                 period_id=p.id,
                 room_id=chunk["room"].id,
                 is_lab_block=False,
+                sks_count=course.sks_count,
             )
             session.lecturer_assignments.append(
                 LecturerAssignment(role_index=0, lecturer_id=primary.id, fallback_reason=None)
@@ -358,6 +359,7 @@ def schedule_one_split(
                 period_id=p.id,
                 room_id=chunk["room"].id,
                 is_lab_block=False,
+                sks_count=course.sks_count,
             )
             session.lecturer_assignments.append(
                 LecturerAssignment(role_index=0, lecturer_id=None, fallback_reason=theory_forced_reason)
@@ -377,6 +379,7 @@ def schedule_one_split(
                 period_id=p.id,
                 room_id=lab_chunk["room"].id,
                 is_lab_block=True,
+                sks_count=course.sks_count,
             )
             session.lecturer_assignments.append(
                 LecturerAssignment(role_index=0, lecturer_id=lab_lecturer_id, fallback_reason=lab_reason)
