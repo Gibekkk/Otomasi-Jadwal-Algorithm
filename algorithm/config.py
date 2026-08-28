@@ -52,6 +52,39 @@ REQUIRE_SPECIALIZATION_MATCH_IF_DEFINED = True
 BALANCE_FULLTIME_LOAD = True
 
 # ---------------------------------------------------------------------------
+# STEP (baru): "utamakan dosen yang pernah mengajar course tersebut sebelum
+# pindah ke dosen lain, kecuali dosen lain itu jauh lebih cocok DAN sangat
+# dibutuhkan di course lain".
+# ---------------------------------------------------------------------------
+# Kalau True: di dalam tier yang sama (DLB tetap dulu, full time tetap
+# belakang -- ini TIDAK diubah), dosen yang PERNAH mengajar course ini
+# (lihat `Lecturer.taught_course_ids`, diisi dari histori
+# `lecture_lecturers` generation-generation sebelumnya) ditaruh paling
+# depan dibanding dosen yang belum pernah, SELAMA dosen "belum pernah" itu
+# tidak memenuhi syarat override di bawah.
+PRIORITIZE_LECTURER_HISTORY = True
+
+# "jauh lebih cocok": dipakai skor kecocokan spesialisasi sederhana =
+# jumlah irisan specialization_ids dosen & course. Dosen yang BELUM
+# pernah mengajar course ini hanya boleh "menyalip" dosen yang riwayatnya
+# ada kalau skor kecocokan spesialisasinya >= angka ini (default 2 berarti
+# minimal cocok di 2 spesialisasi sekaligus, bukan cuma exact-match yang
+# memang sudah wajib lewat REQUIRE_SPECIALIZATION_MATCH_IF_DEFINED).
+HISTORY_OVERRIDE_MIN_FIT_SCORE = 2
+
+# "sangat dibutuhkan" (khusus dosen DLB): dosen tsb dianggap "sangat
+# dibutuhkan" di course ini kalau jadwalnya SANGAT PAS/mepet dengan
+# kebutuhan course -- selisih (schedule_count dosen - kebutuhan slot
+# course) <= angka ini. 0 berarti jadwal dosen itu PAS-PAS-AN sekali
+# (tidak ada slot lebih), jadi kemungkinan besar dia memang cuma bisa
+# masuk di course ini saja (kalau dipakai di course lain, course ini
+# berisiko tidak kebagian dosen sama sekali). Dosen full time (unlimited
+# schedule) tidak pernah dianggap "sangat dibutuhkan" lewat jalur ini --
+# untuk full time, override HANYA butuh syarat kecocokan spesialisasi di
+# atas (karena jadwalnya memang tidak pernah mepet).
+HISTORY_OVERRIDE_MAX_SLACK = 0
+
+# ---------------------------------------------------------------------------
 # STEP: "find suitable schedule, scale with lecturer count"
 # ---------------------------------------------------------------------------
 # lecturer_count di course = total dosen yang mengajar bareng (co-teaching).

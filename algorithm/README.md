@@ -10,7 +10,13 @@ mengimplementasikan flow generate jadwal yang sudah didiskusikan:
 3. Cocokkan course ke kandidat dosen: `course.sks_count <= jumlah jadwal
    dosen` (khusus DLB), plus filter kategori/prodi & spesialisasi.
 4. Urutkan kandidat: **DLB dulu**, ascending berdasar jumlah jadwal
-   (paling sempit duluan), baru dosen full time.
+   (paling sempit duluan), baru dosen full time. **Di dalam tier yang
+   sama** (DLB vs DLB, full time vs full time), dosen yang **pernah
+   mengajar course ini sebelumnya** didahulukan lebih dulu -- kecuali ada
+   dosen lain yang jauh lebih cocok (skor spesialisasi) DAN sangat
+   dibutuhkan di course ini (khusus DLB: jadwalnya mepet sekali dengan
+   kebutuhan course), baru dosen itu boleh "menyalip". Lihat bagian
+   "Riwayat mengajar" di bawah.
 5. Cari slot jadwal (hari + periode), di-scale sesuai `lecturer_count`
    (dosen tambahan boleh bentrok jadwal, cuma dosen utama yang dicek
    bentrok).
@@ -174,6 +180,44 @@ kolom `bit(1)` sebagai `bytes` mentah (`b'\x00'`/`b'\x01'`), bukan
 sudah lewat helper `to_bool()`. Kalau kamu nambah query baru yang baca
 kolom `bit(1)`, pastikan tetap pakai `to_bool()`, jangan `bool()`
 langsung.
+
+## Riwayat mengajar (STEP baru): utamakan dosen yang pernah mengajar course ini
+
+Sebelum urutan berdasarkan histori diterapkan, DLB tetap **selalu** di
+depan full time (tidak berubah). Perubahan hanya terjadi **di dalam** satu
+tier (DLB dibandingkan DLB, full time dibandingkan full time):
+
+1. `repository.load_lecturer_course_history()` membaca semua baris
+   `lecture_lecturers` -> `lectures` -> `course_schedules` dari
+   generation-generation LAIN (bukan generation yang sedang berjalan) untuk
+   membangun peta `lecturer_id -> {course_id yang pernah diampu}`.
+   `generator.py` menempelkan peta ini ke `Lecturer.taught_course_ids`
+   sebelum matching dijalankan.
+2. `matching.build_candidates()` menaruh dosen dengan
+   `course.id in lecturer.taught_course_ids` di depan dosen yang belum
+   pernah, dalam tier yang sama.
+3. Dosen yang **belum pernah** mengajar course ini hanya boleh menyalip
+   dosen riwayat kalau **kedua** syarat ini terpenuhi (lihat
+   `matching._history_rank()`):
+   - **Jauh lebih cocok**: skor irisan `specialization_ids` course &
+     dosen `>= config.HISTORY_OVERRIDE_MIN_FIT_SCORE` (default `2`).
+   - **Sangat dibutuhkan di course ini**: khusus DLB, selisih
+     (`jumlah slot jadwal dosen - kebutuhan slot course`) harus
+     `<= config.HISTORY_OVERRIDE_MAX_SLACK` (default `0`, artinya
+     jadwal dosen itu PAS-PAS-AN dengan kebutuhan course, kemungkinan
+     besar dia memang cuma cocok ditaruh di course ini). Untuk dosen
+     full time (jadwal dianggap unlimited, tidak pernah "mepet"), syarat
+     ini otomatis lolos -- cukup syarat kecocokan spesialisasi saja.
+
+Semua bisa dimatikan/disetel lewat `config.py`:
+
+```python
+PRIORITIZE_LECTURER_HISTORY = True      # matikan -> balik ke urutan lama (DLB/full-time saja)
+HISTORY_OVERRIDE_MIN_FIT_SCORE = 2      # ambang "jauh lebih cocok"
+HISTORY_OVERRIDE_MAX_SLACK = 0          # ambang "sangat dibutuhkan" (khusus DLB)
+```
+
+Test-nya ada di `tests/test_history_priority.py`.
 
 ## Skema tabel yang dipakai
 

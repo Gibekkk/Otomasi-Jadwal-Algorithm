@@ -85,13 +85,24 @@ def generate_timeline(
     rooms = repo.load_rooms()
     courses = repo.load_courses(is_odd=is_odd)
 
+    # STEP (baru): "utamakan dosen yang pernah mengajar course tersebut
+    # sebelum pindah ke dosen lain" -- lihat matching._history_rank().
+    # Histori diambil dari generation-generation LAIN (exclude tg id yang
+    # sedang berjalan sekarang, supaya retry generate untuk tg yang sama
+    # tidak menganggap hasilnya sendiri sebagai "histori").
+    history = repo.load_lecturer_course_history(exclude_timeline_generation_id=timeline_generation_id)
+    for lecturer_id, lecturer in lecturers.items():
+        lecturer.taught_course_ids = history.get(lecturer_id, set())
+
     logger.info(
-        "Data loaded: %d lecturers (%d DLB), %d rooms, %d periods, %d courses",
+        "Data loaded: %d lecturers (%d DLB), %d rooms, %d periods, %d courses, "
+        "%d lecturers with teaching history",
         len(lecturers),
         sum(1 for l in lecturers.values() if l.is_dlb),
         len(rooms),
         len(periods),
         len(courses),
+        sum(1 for l in lecturers.values() if l.taught_course_ids),
     )
 
     if not periods:

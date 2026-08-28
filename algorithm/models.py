@@ -40,11 +40,21 @@ class Lecturer:
     available_period_ids: Set[str] = field(default_factory=set)
     is_dlb: bool = False
 
+    # STEP (baru): "utamakan dosen yang pernah mengajar course tersebut
+    # sebelum pindah ke dosen lain". Diisi dari histori `lecture_lecturers`
+    # + `lectures` + `course_schedules` pada generation-generation
+    # SEBELUMNYA (lihat repository.load_lecturer_course_history()).
+    # Berisi kumpulan course_id yang PERNAH diampu dosen ini.
+    taught_course_ids: Set[str] = field(default_factory=set)
+
     # --- state yang berubah selama proses generate (bukan dari DB) ---
     # booked[day] = set of period_id yang sudah dipakai dosen ini sebagai
     # dosen UTAMA pada generation yang sedang berjalan.
     booked: Dict[str, Set[str]] = field(default_factory=dict)
     assigned_course_count: int = 0
+
+    def has_taught(self, course_id: str) -> bool:
+        return course_id in self.taught_course_ids
 
     def schedule_count(self) -> Optional[int]:
         """None berarti 'unlimited' (dosen full time)."""

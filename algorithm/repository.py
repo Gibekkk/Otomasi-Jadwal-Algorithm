@@ -124,6 +124,43 @@ class Repository:
             )
         return lecturers
 
+    def load_lecturer_course_history(self, exclude_timeline_generation_id: str | None = None) -> Dict[str, set]:
+        """STEP (baru): "utamakan dosen yang pernah mengajar course
+        tersebut". Ambil histori dosen <-> course dari generation-generation
+        SEBELUMNYA lewat `lecture_lecturers` -> `lectures` ->
+        `course_schedules` (course_id).
+
+        `exclude_timeline_generation_id`: kalau diisi, baris `lectures`
+        milik timeline_generation ini sendiri TIDAK ikut dihitung sebagai
+        histori -- supaya generate ulang (retry) untuk generation yang
+        sama tidak "menganggap" hasil generation itu sendiri sebagai
+        histori sebelum sempat dihapus oleh `clear_previous_generation`.
+
+        Return: dict lecturer_id -> set(course_id) yang PERNAH diampu
+        dosen tsb (di generation lain mana pun, tidak dibedakan
+        ganjil/genap -- niatnya "pernah mengajar course ini", bukan
+        "pernah mengajar course ini di semester yang sama")."""
+        query = (
+            "SELECT ll.lecturer_id, cs.course_id "
+            "FROM lecture_lecturers ll "
+            "JOIN lectures l ON l.id = ll.lecture_id "
+            "JOIN course_schedules cs ON cs.id = l.course_schedule_id "
+            "WHERE ll.lecturer_id IS NOT NULL"
+        )
+        params: tuple = ()
+        if exclude_timeline_generation_id is not None:
+            query += " AND l.timeline_generation_id != %s"
+            params = (exclude_timeline_generation_id,)
+
+        with self.conn.cursor() as cur:
+            cur.execute(query, params)
+            rows = cur.fetchall()
+
+        history: Dict[str, set] = {}
+        for r in rows:
+            history.setdefault(r["lecturer_id"], set()).add(r["course_id"])
+        return history
+
     def load_rooms(self) -> List[Room]:
         with self.conn.cursor() as cur:
             cur.execute(
