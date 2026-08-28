@@ -70,6 +70,24 @@ ALLOW_THEORY_SPLIT_ACROSS_DAYS = True
 ALLOW_LAB_SPLIT_ACROSS_DAYS = False
 
 # ---------------------------------------------------------------------------
+# STEP (baru): "kalau schedule sudah tidak cukup untuk memenuhi sks_count,
+# course_schedule dipecah jadi 2 dengan sisa sks di hari lain, dosen sama".
+# ---------------------------------------------------------------------------
+# Sebelumnya `_allocate_theory` HANYA pindah ke hari lain kalau hari
+# pertama BENAR-BENAR kehabisan slot kontigu (greedy: ambil sebanyak
+# mungkin periode kontigu dalam 1 hari dulu). Ini bisa menghabiskan
+# hampir seluruh jadwal harian dosen untuk 1 course saja kalau sks-nya
+# lumayan besar (3 atau 4).
+#
+# Kalau `sks_count` course ada di set ini, alokasi teori PROAKTIF dibatasi
+# maksimal `ceil(sks_count / 2)` periode per hari (lihat
+# `scheduler._day_split_cap`), supaya course_schedule otomatis terpecah
+# jadi 2 hari (dosen yang sama) walaupun sebenarnya hari itu masih cukup
+# periode buat menampung semuanya sekaligus -- tujuannya supaya jadwal
+# harian dosen tidak habis dipakai 1 course saja.
+PRIORITIZE_DAY_SPLIT_FOR_SKS = {3, 4}
+
+# ---------------------------------------------------------------------------
 # STEP: "if lab, ... 6-7 strategy"
 # ---------------------------------------------------------------------------
 # Interpretasi yang dipakai di sini (SILAKAN SESUAIKAN):
@@ -114,10 +132,10 @@ COURSE_INDEX_LABELS = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 # ---------------------------------------------------------------------------
 # Fallback reasons (dipakai untuk mengisi lectures.fallback_reason)
 # ---------------------------------------------------------------------------
-REASON_NO_ELIGIBLE_LECTURER = "Tidak ditemukan dosen yang memenuhi syarat (kategori/spesialisasi/kapasitas jadwal)"
-REASON_NO_FREE_SLOT_FOR_ANY_CANDIDATE = "Semua kandidat dosen tidak memiliki slot jadwal kosong yang cocok"
-REASON_PARTIAL_THEORY = "Sesi teori tidak terpenuhi penuh ({done}/{needed} periode terjadwal), sisa periode tidak dapat slot"
-REASON_NO_LAB_SLOT = "Tidak ditemukan slot ruang lab yang sesuai (kapasitas/spesialisasi/jadwal) dalam satu hari"
-REASON_NO_ROOM = "Tidak ditemukan ruang dengan kapasitas cukup pada slot yang dipilih"
-REASON_NO_EXTRA_LECTURER = "Tidak ditemukan dosen tambahan (co-lecturer) yang memenuhi syarat"
-REASON_FORCED_PLACEMENT = "Dijadwalkan secara paksa (best-effort) karena pencarian slot bebas-bentrok gagal -- perlu dicek manual"
+REASON_NO_ELIGIBLE_LECTURER = "No eligible lecturer found (category/specialization/schedule capacity)"
+REASON_NO_FREE_SLOT_FOR_ANY_CANDIDATE = "No candidate lecturer has a matching free schedule slot"
+REASON_PARTIAL_THEORY = "Theory session not fully satisfied ({done}/{needed} periods scheduled), remaining periods could not get a slot"
+REASON_NO_LAB_SLOT = "No suitable lab room slot found (capacity/specialization/schedule) within a single day"
+REASON_NO_ROOM = "No room with sufficient capacity found for the selected slot"
+REASON_NO_EXTRA_LECTURER = "No eligible additional (co-)lecturer found"
+REASON_FORCED_PLACEMENT = "Forcibly scheduled (best-effort) because finding a conflict-free slot failed -- needs manual review"

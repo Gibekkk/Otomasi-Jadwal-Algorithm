@@ -74,7 +74,7 @@ def generate_timeline(
     tg = repo.get_timeline_generation(timeline_generation_id)
     is_odd = tg["is_odd"]
     logger.info(
-        "Mulai generate: timeline_generation_id=%s academic_year=%s is_odd=%s",
+        "Starting generation: timeline_generation_id=%s academic_year=%s is_odd=%s",
         timeline_generation_id,
         tg["academic_year"],
         is_odd,
@@ -86,7 +86,7 @@ def generate_timeline(
     courses = repo.load_courses(is_odd=is_odd)
 
     logger.info(
-        "Data dimuat: %d dosen (%d DLB), %d ruang, %d periode, %d course",
+        "Data loaded: %d lecturers (%d DLB), %d rooms, %d periods, %d courses",
         len(lecturers),
         sum(1 for l in lecturers.values() if l.is_dlb),
         len(rooms),
@@ -95,7 +95,7 @@ def generate_timeline(
     )
 
     if not periods:
-        raise ValueError("Tabel `schedules` kosong -- tidak ada periode waktu untuk dijadwalkan")
+        raise ValueError("`schedules` table is empty -- no time periods available to schedule")
 
     stats = GenerationStats(total_courses=len(courses))
     all_sessions: List[PlannedSession] = []
@@ -103,7 +103,7 @@ def generate_timeline(
     for course in order_courses(courses):
         candidates = build_candidates(course, lecturers)
         if not candidates:
-            stats.issues.append(f"course '{course.name}' ({course.id}): tidak ada kandidat dosen sama sekali")
+            stats.issues.append(f"course '{course.name}' ({course.id}): no lecturer candidates at all")
 
         sessions = schedule_course(course, candidates, rooms, periods, cfg.DAY_ORDER)
         all_sessions.extend(sessions)
@@ -133,7 +133,7 @@ def generate_timeline(
             for m in missing:
                 stats.splits_without_room += 1
                 stats.issues.append(
-                    f"course '{course.name}' ({course.id}) split {m}: blok lab tidak dapat ruang sama sekali"
+                    f"course '{course.name}' ({course.id}) split {m}: lab block could not get a room at all"
                 )
 
         # --- catat split yang porsi teorinya tidak lengkap (sebagian
@@ -149,8 +149,8 @@ def generate_timeline(
                 )
                 if theory_count < theory_needed:
                     stats.issues.append(
-                        f"course '{course.name}' ({course.id}) split {split}: sesi teori tidak lengkap "
-                        f"({theory_count}/{theory_needed} periode dapat ruang)"
+                        f"course '{course.name}' ({course.id}) split {split}: theory session incomplete "
+                        f"({theory_count}/{theory_needed} periods got a room)"
                     )
 
     stats.total_sessions = len(all_sessions)
@@ -161,12 +161,12 @@ def generate_timeline(
             repo.clear_previous_generation(timeline_generation_id)
         persisted = repo.persist(timeline_generation_id, all_sessions)
         logger.info(
-            "Generate selesai & disimpan: %d course_schedules, %d lectures, %d lecture_lecturers",
+            "Generation finished & saved: %d course_schedules, %d lectures, %d lecture_lecturers",
             persisted.get("course_schedules_inserted", 0),
             persisted.get("lectures_inserted", 0),
             persisted.get("lecture_lecturers_inserted", 0),
         )
     else:
-        logger.info("Dry-run (commit=False): %d session dihitung, tidak ditulis ke DB", len(all_sessions))
+        logger.info("Dry-run (commit=False): %d sessions computed, nothing written to DB", len(all_sessions))
 
     return GenerationResult(all_sessions, stats, persisted)

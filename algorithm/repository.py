@@ -58,7 +58,7 @@ class Repository:
             )
             row = cur.fetchone()
         if row is None:
-            raise ValueError(f"timeline_generation_id tidak ditemukan: {timeline_generation_id}")
+            raise ValueError(f"timeline_generation_id not found: {timeline_generation_id}")
         row["is_odd"] = to_bool(row["is_odd"])
         return row
 

@@ -72,6 +72,28 @@ def _compute_splits(course: Course, rooms: Sequence[Room]) -> int:
     return max(splits_by_room, splits_by_lab, 1)
 
 
+def _day_split_cap(total_needed: int) -> int:
+    """STEP (baru): 'kalau schedule sudah tidak cukup untuk memenuhi
+    sks_count, course_schedule dipecah jadi 2 dengan sisa sks di hari
+    lain, dosen sama'.
+
+    Kalau `total_needed` (sks_count course) termasuk yang wajib
+    diprioritaskan untuk displit (lihat `cfg.PRIORITIZE_DAY_SPLIT_FOR_SKS`,
+    default {3, 4}), batasi maksimal periode yang boleh diambil DALAM SATU
+    HARI jadi `ceil(total_needed / 2)` -- supaya course otomatis kepecah
+    ke 2 hari (dosen yang sama) walaupun hari itu sebenarnya masih cukup
+    periode buat menampung semuanya sekaligus. Ini mencegah 1 hari jadwal
+    dosen habis dipakai 1 course besar (sks 3/4) saja.
+
+    Untuk sks_count di luar set itu, tidak ada batas tambahan (`total_needed`
+    dikembalikan apa adanya -- perilaku lama: ambil sebanyak mungkin dalam
+    1 hari, baru pindah hari kalau memang kehabisan slot).
+    """
+    if total_needed in cfg.PRIORITIZE_DAY_SPLIT_FOR_SKS:
+        return math.ceil(total_needed / 2)
+    return total_needed
+
+
 def _allocate_theory(
     course: Course,
     lecturer: Lecturer,
@@ -82,21 +104,32 @@ def _allocate_theory(
     day_order: Sequence[str],
 ) -> tuple:
     """STEP: 'find suitable schedule' + 'find suitable rooms by capacity'
-    + 'kalau jadwal dosen/hari habis, cari hari lain, dosen tetap sama'.
+    + 'kalau jadwal dosen/hari habis, cari hari lain, dosen tetap sama'
+    + 'kalau sks_count 3/4, prioritaskan split ke hari lain supaya tidak
+    menghabiskan jadwal harian' (lihat `_day_split_cap`).
 
     Return (chunks, remaining) di mana chunks = list of
-    {"day", "periods":[Period,...], "room": Room} dan remaining = sisa
-    periode yang TIDAK dapat slot (0 kalau penuh terpenuhi).
+    {"day", "periods":[Period,...], "room": Room, "sks_count": int}
+    dan remaining = sisa periode yang TIDAK dapat slot (0 kalau penuh
+    terpenuhi). `sks_count` pada tiap chunk = jumlah periode NYATA yang
+    berhasil dialokasikan untuk chunk (hari) tsb -- dipakai supaya
+    `course_schedules.sks_count` mencerminkan porsi sks course yang benar2
+    ada di hari itu, bukan selalu total sks_count course secara utuh.
     """
     chunks = []
     remaining = needed
+    day_cap = _day_split_cap(needed)
     for day in day_order:
         if remaining <= 0:
             break
+        # Batasi permintaan periode di hari ini ke `day_cap` (kalau
+        # sks_count course termasuk yang diprioritaskan displit), supaya
+        # tidak "menghabiskan" seluruh slot harian hanya untuk 1 course.
+        want_this_day = min(remaining, day_cap)
         result = find_best_run_with_room(
             periods,
             day,
-            remaining,
+            want_this_day,
             lecturer,
             rooms,
             min_capacity=per_split_capacity,
@@ -106,8 +139,11 @@ def _allocate_theory(
         )
         if result is None:
             continue
-        chunks.append({"day": day, "periods": result["periods"], "room": result["room"]})
-        remaining -= len(result["periods"])
+        got = len(result["periods"])
+        chunks.append(
+            {"day": day, "periods": result["periods"], "room": result["room"], "sks_count": got}
+        )
+        remaining -= got
         if not cfg.ALLOW_THEORY_SPLIT_ACROSS_DAYS:
             break
     return chunks, remaining
@@ -140,7 +176,12 @@ def _allocate_lab(
             require_full_length=True,
         )
         if result is not None:
-            return {"day": day, "periods": result["periods"], "room": result["room"]}
+            return {
+                "day": day,
+                "periods": result["periods"],
+                "room": result["room"],
+                "sks_count": len(result["periods"]),
+            }
         if not cfg.ALLOW_LAB_SPLIT_ACROSS_DAYS:
             continue
     return None
@@ -190,7 +231,9 @@ def _force_placement(
                 pids = [p.id for p in window]
                 room = find_room_for_run(rooms, day, pids, per_split_capacity, want_lab, spec_ids)
                 if room:
-                    chunks.append({"day": day, "periods": list(window), "room": room})
+                    chunks.append(
+                        {"day": day, "periods": list(window), "room": room, "sks_count": length}
+                    )
                     remaining -= length
                     placed_this_day = True
                     break
@@ -339,7 +382,7 @@ def schedule_one_split(
                 period_id=p.id,
                 room_id=chunk["room"].id,
                 is_lab_block=False,
-                sks_count=course.sks_count,
+                sks_count=chunk["sks_count"],
             )
             session.lecturer_assignments.append(
                 LecturerAssignment(role_index=0, lecturer_id=primary.id, fallback_reason=None)
@@ -359,7 +402,7 @@ def schedule_one_split(
                 period_id=p.id,
                 room_id=chunk["room"].id,
                 is_lab_block=False,
-                sks_count=course.sks_count,
+                sks_count=chunk["sks_count"],
             )
             session.lecturer_assignments.append(
                 LecturerAssignment(role_index=0, lecturer_id=None, fallback_reason=theory_forced_reason)
@@ -379,7 +422,7 @@ def schedule_one_split(
                 period_id=p.id,
                 room_id=lab_chunk["room"].id,
                 is_lab_block=True,
-                sks_count=course.sks_count,
+                sks_count=lab_chunk["sks_count"],
             )
             session.lecturer_assignments.append(
                 LecturerAssignment(role_index=0, lecturer_id=lab_lecturer_id, fallback_reason=lab_reason)
