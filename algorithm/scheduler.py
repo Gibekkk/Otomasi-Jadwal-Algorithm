@@ -427,7 +427,13 @@ def schedule_one_split(
             period_id=lab_chunk["periods"][0].id,
             room_id=lab_chunk["room"].id,
             is_lab_block=True,
-            sks_count=lab_chunk["sks_count"],
+            # PENTING: beda dgn teori -- utk blok lab, backend SUDAH punya
+            # konvensi tetap "1 course_schedule lab = LAB_BLOCK_SKS_EQUIVALENT
+            # (3) schedule slot berturut-turut dari period_id start", jadi
+            # `sks_count` yang disimpan harus tetap 1 (bukan jumlah periode
+            # nyata yang dicakup blok itu). Backend yang mengekspansi 1 jadi
+            # 3 schedule sendiri saat dibaca.
+            sks_count=1,
         )
         session.lecturer_assignments.append(
             LecturerAssignment(role_index=0, lecturer_id=lab_lecturer_id, fallback_reason=lab_reason)

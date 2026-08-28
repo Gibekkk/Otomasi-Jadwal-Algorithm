@@ -188,15 +188,20 @@ def run():
     )
 
     # C2: course lab sks=4 -> teori 3 periode (kepecah 2+1 hari krn day-split
-    # cap sks=3) + 1 blok lab kontigu sks_count=3 -> total 3 course_schedule
-    # (2 teori + 1 lab), BUKAN 6 course_schedule 1-per-periode.
+    # cap sks=3) + 1 blok lab kontigu -> total 3 course_schedule (2 teori +
+    # 1 lab), BUKAN 6 course_schedule 1-per-periode. Blok lab disimpan
+    # dengan sks_count=1 (bukan 3) krn backend sudah punya konvensi tetap
+    # "1 course_schedule lab = 3 schedule slot berturutan dari period_id
+    # start" -- period_id start-nya tetap harus benar (awal blok 3-periode).
     c2_sessions = [s for s in all_sessions if s.course_id == "C2"]
     lab_blocks = [s for s in c2_sessions if s.is_lab_block]
     theory_blocks = [s for s in c2_sessions if not s.is_lab_block]
     assert len(theory_blocks) == 2, f"C2 teori harus 2 course_schedule (chunk 2+1 hari), dapat {len(theory_blocks)}"
     assert sum(s.sks_count for s in theory_blocks) == 3, "total sks_count teori C2 harus 3"
-    assert len(lab_blocks) == 1, f"C2 lab harus 1 course_schedule kontigu (sks_count=3), dapat {len(lab_blocks)}"
-    assert lab_blocks[0].sks_count == 3, "sks_count blok lab C2 harus 3 (LAB_BLOCK_SKS_EQUIVALENT)"
+    assert len(lab_blocks) == 1, f"C2 lab harus 1 course_schedule kontigu, dapat {len(lab_blocks)}"
+    assert lab_blocks[0].sks_count == 1, (
+        "sks_count blok lab C2 harus tetap 1 (backend sudah mengekspansi 1 lab jadi 3 schedule sendiri)"
+    )
     lab_room = next(r for r in rooms if r.id == lab_blocks[0].room_id)
     assert lab_room.is_lab and SPEC_NETWORK in lab_room.lab_specialization_ids, (
         "ruang lab yg dipilih harus match spesialisasi course (jaringan)"
