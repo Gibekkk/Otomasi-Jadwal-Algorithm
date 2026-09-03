@@ -76,6 +76,7 @@ echo ">>> Membersihkan tar.gz sisa build sebelumnya (kecuali yang baru saja diup
 find . -maxdepth 1 -name "${env.IMAGE_NAME}-*.tar.gz" ! -name "${env.IMAGE_TAR}" -delete || true
 
 docker image prune -f || true
+docker network create jadwal-network || true
 
 echo ">>> Loading image baru..."
 gunzip -c ${env.IMAGE_TAR} | docker load
