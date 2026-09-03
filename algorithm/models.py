@@ -25,7 +25,7 @@ class Period:
 @dataclass
 class Lecturer:
     """Satu baris `lecturers`, sudah digabung dengan spesialisasi &
-    ketersediaan jadwal (`lecturer_schedules`)."""
+    ketersediaan jadwal (`lecturer_schedules` + `lecturer_schedules_time`)."""
 
     id: str
     name: str
@@ -34,18 +34,18 @@ class Lecturer:
     is_interdiscipline: bool
     specialization_ids: Set[str] = field(default_factory=set)
 
-    # None periods_id set kosong + is_dlb=False -> dosen full time
-    # (tidak ada baris di lecturer_schedules), dianggap tersedia di SEMUA
-    # periode/hari. is_dlb=True -> hanya tersedia di available_period_ids.
-    available_period_ids: Set[str] = field(default_factory=set)
+    # {} kosong + is_dlb=False -> dosen full time (tidak ada baris di
+    # lecturer_schedules sama sekali), dianggap tersedia di SEMUA hari &
+    # periode. is_dlb=True -> hanya tersedia di hari & periode yang
+    # tercatat: available_periods_by_day[day] = set periode yang tersedia
+    # HARI itu -- bisa beda-beda tiap hari (lecturer_schedules = 1 baris
+    # per (dosen, hari), lecturer_schedules_time = fan-out ke periode
+    # spesifik hari itu). Dosen yang punya baris lecturer_schedules tapi
+    # nol periode ter-link (data tidak lengkap) tetap is_dlb=True dengan
+    # available_periods_by_day kosong -> schedule_count()=0 -> otomatis
+    # tidak lolos eligibility manapun, TIDAK dianggap full time.
+    available_periods_by_day: Dict[str, Set[str]] = field(default_factory=dict)
     is_dlb: bool = False
-
-    # STEP (baru): "utamakan dosen yang pernah mengajar course tersebut
-    # sebelum pindah ke dosen lain". Diisi dari histori `lecture_lecturers`
-    # + `lectures` + `course_schedules` pada generation-generation
-    # SEBELUMNYA (lihat repository.load_lecturer_course_history()).
-    # Berisi kumpulan course_id yang PERNAH diampu dosen ini.
-    taught_course_ids: Set[str] = field(default_factory=set)
 
     # --- state yang berubah selama proses generate (bukan dari DB) ---
     # booked[day] = set of period_id yang sudah dipakai dosen ini sebagai
@@ -53,17 +53,15 @@ class Lecturer:
     booked: Dict[str, Set[str]] = field(default_factory=dict)
     assigned_course_count: int = 0
 
-    def has_taught(self, course_id: str) -> bool:
-        return course_id in self.taught_course_ids
-
     def schedule_count(self) -> Optional[int]:
-        """None berarti 'unlimited' (dosen full time)."""
+        """None berarti 'unlimited' (dosen full time). Untuk DLB: total
+        slot periode yang tersedia, dijumlah dari SEMUA hari."""
         if not self.is_dlb:
             return None
-        return len(self.available_period_ids)
+        return sum(len(periods) for periods in self.available_periods_by_day.values())
 
     def is_free(self, day: str, period_id: str) -> bool:
-        if self.is_dlb and period_id not in self.available_period_ids:
+        if self.is_dlb and period_id not in self.available_periods_by_day.get(day, set()):
             return False
         return period_id not in self.booked.get(day, set())
 

@@ -58,7 +58,7 @@ class Repository:
             )
             row = cur.fetchone()
         if row is None:
-            raise ValueError(f"timeline_generation_id not found: {timeline_generation_id}")
+            raise ValueError(f"timeline_generation_id tidak ditemukan: {timeline_generation_id}")
         row["is_odd"] = to_bool(row["is_odd"])
         return row
 
@@ -94,24 +94,39 @@ class Repository:
             )
             spec_rows = cur.fetchall()
 
-            cur.execute("SELECT lecturer_id, schedule_id FROM lecturer_schedules")
-            schedule_rows = cur.fetchall()
+            # `lecturer_schedules` cuma nyimpen (lecturer_id, day) -- artinya
+            # "dosen ini punya catatan DLB di hari itu". Periode SPESIFIK
+            # yang tersedia di hari itu ada di tabel terpisah
+            # `lecturer_schedules_time` (many-to-many: 1 baris
+            # lecturer_schedules bisa fan-out ke banyak schedule_id).
+            # Query DLB-marker dipisah dari query periode supaya dosen yang
+            # kehari-annya kecatat tapi lupa ditambahin jam (baris
+            # lecturer_schedules_time-nya kosong) tetap kehitung DLB dengan
+            # 0 slot (tidak lolos eligibility manapun), BUKAN malah
+            # dianggap full time / unlimited karena tidak ketemu di query
+            # periode.
+            cur.execute("SELECT DISTINCT lecturer_id FROM lecturer_schedules")
+            dlb_lecturer_ids = {r["lecturer_id"] for r in cur.fetchall()}
+
+            cur.execute(
+                "SELECT lsched.lecturer_id, lsched.day, lst.schedule_id "
+                "FROM lecturer_schedules lsched "
+                "JOIN lecturer_schedules_time lst ON lst.lecturer_schedule_id = lsched.id"
+            )
+            availability_rows = cur.fetchall()
 
         specs_by_lecturer: Dict[str, set] = {}
         for r in spec_rows:
             specs_by_lecturer.setdefault(r["lecturer_id"], set()).add(r["specialization_id"])
 
-        schedules_by_lecturer: Dict[str, set] = {}
-        for r in schedule_rows:
-            schedules_by_lecturer.setdefault(r["lecturer_id"], set()).add(r["schedule_id"])
+        periods_by_day_by_lecturer: Dict[str, Dict[str, set]] = {}
+        for r in availability_rows:
+            day_map = periods_by_day_by_lecturer.setdefault(r["lecturer_id"], {})
+            day_map.setdefault(r["day"], set()).add(r["schedule_id"])
 
         lecturers: Dict[str, Lecturer] = {}
         for row in lecturer_rows:
             lid = row["id"]
-            available = schedules_by_lecturer.get(lid, set())
-            # STEP: "split dlbs (dlb is a lecturer that has schedule, the
-            # ones that doesn't have schedule is full time)"
-            is_dlb = lid in schedules_by_lecturer and len(available) > 0
             lecturers[lid] = Lecturer(
                 id=lid,
                 name=row["name"],
@@ -119,47 +134,10 @@ class Repository:
                 is_active=to_bool(row["is_active"]),
                 is_interdiscipline=to_bool(row["is_interdiscipline"]),
                 specialization_ids=specs_by_lecturer.get(lid, set()),
-                available_period_ids=available,
-                is_dlb=is_dlb,
+                available_periods_by_day=periods_by_day_by_lecturer.get(lid, {}),
+                is_dlb=lid in dlb_lecturer_ids,
             )
         return lecturers
-
-    def load_lecturer_course_history(self, exclude_timeline_generation_id: str | None = None) -> Dict[str, set]:
-        """STEP (baru): "utamakan dosen yang pernah mengajar course
-        tersebut". Ambil histori dosen <-> course dari generation-generation
-        SEBELUMNYA lewat `lecture_lecturers` -> `lectures` ->
-        `course_schedules` (course_id).
-
-        `exclude_timeline_generation_id`: kalau diisi, baris `lectures`
-        milik timeline_generation ini sendiri TIDAK ikut dihitung sebagai
-        histori -- supaya generate ulang (retry) untuk generation yang
-        sama tidak "menganggap" hasil generation itu sendiri sebagai
-        histori sebelum sempat dihapus oleh `clear_previous_generation`.
-
-        Return: dict lecturer_id -> set(course_id) yang PERNAH diampu
-        dosen tsb (di generation lain mana pun, tidak dibedakan
-        ganjil/genap -- niatnya "pernah mengajar course ini", bukan
-        "pernah mengajar course ini di semester yang sama")."""
-        query = (
-            "SELECT ll.lecturer_id, cs.course_id "
-            "FROM lecture_lecturers ll "
-            "JOIN lectures l ON l.id = ll.lecture_id "
-            "JOIN course_schedules cs ON cs.id = l.course_schedule_id "
-            "WHERE ll.lecturer_id IS NOT NULL"
-        )
-        params: tuple = ()
-        if exclude_timeline_generation_id is not None:
-            query += " AND l.timeline_generation_id != %s"
-            params = (exclude_timeline_generation_id,)
-
-        with self.conn.cursor() as cur:
-            cur.execute(query, params)
-            rows = cur.fetchall()
-
-        history: Dict[str, set] = {}
-        for r in rows:
-            history.setdefault(r["lecturer_id"], set()).add(r["course_id"])
-        return history
 
     def load_rooms(self) -> List[Room]:
         with self.conn.cursor() as cur:
