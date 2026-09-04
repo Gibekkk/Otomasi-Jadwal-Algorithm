@@ -81,7 +81,7 @@ class Repository:
     def load_lecturers(self) -> Dict[str, Lecturer]:
         with self.conn.cursor() as cur:
             cur.execute(
-                "SELECT id, name, category_id, is_active, is_interdiscipline "
+                "SELECT id, name, category_id, is_active, is_interdiscipline, is_male, religion "
                 "FROM lecturers WHERE is_active = 1 AND deleted_at IS NULL"
             )
             lecturer_rows = cur.fetchall()
@@ -136,6 +136,8 @@ class Repository:
                 specialization_ids=specs_by_lecturer.get(lid, set()),
                 available_periods_by_day=periods_by_day_by_lecturer.get(lid, {}),
                 is_dlb=lid in dlb_lecturer_ids,
+                is_male=to_bool(row["is_male"]),
+                religion=row["religion"],
             )
         return lecturers
 
@@ -182,7 +184,7 @@ class Repository:
         with self.conn.cursor() as cur:
             cur.execute(
                 "SELECT id, name, capacity, sks_count, lecturer_count, is_lab, is_odd, "
-                "is_active, is_interdiscipline, category_id "
+                "is_active, is_interdiscipline, category_id, semester, submajor_id "
                 "FROM courses WHERE is_active = 1 AND is_odd = %s AND deleted_at IS NULL",
                 (1 if is_odd else 0,),
             )
@@ -215,9 +217,20 @@ class Repository:
                     is_interdiscipline=to_bool(row["is_interdiscipline"]),
                     category_id=row["category_id"],
                     specialization_ids=specs_by_course.get(row["id"], set()),
+                    semester=row["semester"],
+                    submajor_id=row["submajor_id"],
                 )
             )
         return courses
+
+    def load_prodi_category_ids(self) -> set:
+        """Categories yang dianggap 'major' sungguhan (is_prodi = 1) --
+        dipakai CohortTracker, category non-prodi (mis. "Umum",
+        "Entrepreneurship") dilewati dari aturan bentrok kohort."""
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT id, is_prodi FROM categories WHERE deleted_at IS NULL")
+            rows = cur.fetchall()
+        return {r["id"] for r in rows if to_bool(r["is_prodi"])}
 
     # ------------------------------------------------------------------
     # WRITE

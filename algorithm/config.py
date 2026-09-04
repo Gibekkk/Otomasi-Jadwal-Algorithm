@@ -52,39 +52,6 @@ REQUIRE_SPECIALIZATION_MATCH_IF_DEFINED = True
 BALANCE_FULLTIME_LOAD = True
 
 # ---------------------------------------------------------------------------
-# STEP (baru): "utamakan dosen yang pernah mengajar course tersebut sebelum
-# pindah ke dosen lain, kecuali dosen lain itu jauh lebih cocok DAN sangat
-# dibutuhkan di course lain".
-# ---------------------------------------------------------------------------
-# Kalau True: di dalam tier yang sama (DLB tetap dulu, full time tetap
-# belakang -- ini TIDAK diubah), dosen yang PERNAH mengajar course ini
-# (lihat `Lecturer.taught_course_ids`, diisi dari histori
-# `lecture_lecturers` generation-generation sebelumnya) ditaruh paling
-# depan dibanding dosen yang belum pernah, SELAMA dosen "belum pernah" itu
-# tidak memenuhi syarat override di bawah.
-PRIORITIZE_LECTURER_HISTORY = True
-
-# "jauh lebih cocok": dipakai skor kecocokan spesialisasi sederhana =
-# jumlah irisan specialization_ids dosen & course. Dosen yang BELUM
-# pernah mengajar course ini hanya boleh "menyalip" dosen yang riwayatnya
-# ada kalau skor kecocokan spesialisasinya >= angka ini (default 2 berarti
-# minimal cocok di 2 spesialisasi sekaligus, bukan cuma exact-match yang
-# memang sudah wajib lewat REQUIRE_SPECIALIZATION_MATCH_IF_DEFINED).
-HISTORY_OVERRIDE_MIN_FIT_SCORE = 2
-
-# "sangat dibutuhkan" (khusus dosen DLB): dosen tsb dianggap "sangat
-# dibutuhkan" di course ini kalau jadwalnya SANGAT PAS/mepet dengan
-# kebutuhan course -- selisih (schedule_count dosen - kebutuhan slot
-# course) <= angka ini. 0 berarti jadwal dosen itu PAS-PAS-AN sekali
-# (tidak ada slot lebih), jadi kemungkinan besar dia memang cuma bisa
-# masuk di course ini saja (kalau dipakai di course lain, course ini
-# berisiko tidak kebagian dosen sama sekali). Dosen full time (unlimited
-# schedule) tidak pernah dianggap "sangat dibutuhkan" lewat jalur ini --
-# untuk full time, override HANYA butuh syarat kecocokan spesialisasi di
-# atas (karena jadwalnya memang tidak pernah mepet).
-HISTORY_OVERRIDE_MAX_SLACK = 0
-
-# ---------------------------------------------------------------------------
 # STEP: "find suitable schedule, scale with lecturer count"
 # ---------------------------------------------------------------------------
 # lecturer_count di course = total dosen yang mengajar bareng (co-teaching).
@@ -101,24 +68,6 @@ CHECK_CONFLICT_FOR_PRIMARY_ONLY = True
 ALLOW_THEORY_SPLIT_ACROSS_DAYS = True
 # Blok lab HARUS dalam satu hari (sesi lab tidak dipecah lintas hari).
 ALLOW_LAB_SPLIT_ACROSS_DAYS = False
-
-# ---------------------------------------------------------------------------
-# STEP (baru): "kalau schedule sudah tidak cukup untuk memenuhi sks_count,
-# course_schedule dipecah jadi 2 dengan sisa sks di hari lain, dosen sama".
-# ---------------------------------------------------------------------------
-# Sebelumnya `_allocate_theory` HANYA pindah ke hari lain kalau hari
-# pertama BENAR-BENAR kehabisan slot kontigu (greedy: ambil sebanyak
-# mungkin periode kontigu dalam 1 hari dulu). Ini bisa menghabiskan
-# hampir seluruh jadwal harian dosen untuk 1 course saja kalau sks-nya
-# lumayan besar (3 atau 4).
-#
-# Kalau `sks_count` course ada di set ini, alokasi teori PROAKTIF dibatasi
-# maksimal `ceil(sks_count / 2)` periode per hari (lihat
-# `scheduler._day_split_cap`), supaya course_schedule otomatis terpecah
-# jadi 2 hari (dosen yang sama) walaupun sebenarnya hari itu masih cukup
-# periode buat menampung semuanya sekaligus -- tujuannya supaya jadwal
-# harian dosen tidak habis dipakai 1 course saja.
-PRIORITIZE_DAY_SPLIT_FOR_SKS = {3, 4}
 
 # ---------------------------------------------------------------------------
 # STEP: "if lab, ... 6-7 strategy"
@@ -165,10 +114,49 @@ COURSE_INDEX_LABELS = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 # ---------------------------------------------------------------------------
 # Fallback reasons (dipakai untuk mengisi lectures.fallback_reason)
 # ---------------------------------------------------------------------------
-REASON_NO_ELIGIBLE_LECTURER = "No eligible lecturer found (category/specialization/schedule capacity)"
-REASON_NO_FREE_SLOT_FOR_ANY_CANDIDATE = "No candidate lecturer has a matching free schedule slot"
-REASON_PARTIAL_THEORY = "Theory session not fully satisfied ({done}/{needed} periods scheduled), remaining periods could not get a slot"
-REASON_NO_LAB_SLOT = "No suitable lab room slot found (capacity/specialization/schedule) within a single day"
-REASON_NO_ROOM = "No room with sufficient capacity found for the selected slot"
-REASON_NO_EXTRA_LECTURER = "No eligible additional (co-)lecturer found"
-REASON_FORCED_PLACEMENT = "Forcibly scheduled (best-effort) because finding a conflict-free slot failed -- needs manual review"
+REASON_NO_ELIGIBLE_LECTURER = "Tidak ditemukan dosen yang memenuhi syarat (kategori/spesialisasi/kapasitas jadwal)"
+REASON_NO_FREE_SLOT_FOR_ANY_CANDIDATE = "Semua kandidat dosen tidak memiliki slot jadwal kosong yang cocok"
+REASON_PARTIAL_THEORY = "Sesi teori tidak terpenuhi penuh ({done}/{needed} periode terjadwal), sisa periode tidak dapat slot"
+REASON_NO_LAB_SLOT = "Tidak ditemukan slot ruang lab yang sesuai (kapasitas/spesialisasi/jadwal) dalam satu hari"
+REASON_NO_ROOM = "Tidak ditemukan ruang dengan kapasitas cukup pada slot yang dipilih"
+REASON_NO_EXTRA_LECTURER = "Tidak ditemukan dosen tambahan (co-lecturer) yang memenuhi syarat"
+REASON_FORCED_PLACEMENT = "Dijadwalkan secara paksa (best-effort) karena pencarian slot bebas-bentrok gagal -- perlu dicek manual"
+
+# ---------------------------------------------------------------------------
+# STEP TAMBAHAN: 1 kohort mahasiswa (major + semester) tidak boleh
+# dijadwalkan bentrok waktu ke course LAIN di kohort yang sama, karena
+# mahasiswa yang sama tidak mungkin ikut 2 kelas sekaligus.
+#   - "Major" = categories yang is_prodi = 1 (category non-prodi seperti
+#     "Umum"/"Entrepreneurship" DILEWATI -- tidak dianggap kohort tetap).
+#   - Major + semester sama -> BENTROK, KECUALI submajor_id-nya BEDA
+#     (termasuk salah satu/kedua course tidak punya submajor_id sama
+#     sekali -- dianggap "beda" dari yang submajor_id-nya terisi).
+#   - Berlaku ke SEMUA porsi (teori & lab), termasuk sesi hasil
+#     force-placement (bentrok kohort itu soal mahasiswa, bukan dosen).
+#   - Split course_index (kelas paralel) dari course yang SAMA TIDAK
+#     dianggap bentrok satu sama lain (itu mahasiswa yang sama, cuma
+#     kapasitasnya dipecah ke beberapa ruang/kelas).
+# ---------------------------------------------------------------------------
+ENFORCE_COHORT_CONFLICT = True
+
+# ---------------------------------------------------------------------------
+# STEP TAMBAHAN: jam istirahat & larangan jadwal Jumat siang.
+# Ditentukan lewat OVERLAP waktu terhadap schedules.time_start/time_end
+# (bukan exact-match ID periode), supaya tetap benar walau jam institusi
+# kamu nanti berubah atau ID periode di DB beda-beda.
+# ---------------------------------------------------------------------------
+# Di-block di level RUANG (semua ruang, semua hari) -- supaya SEMUA course
+# ikut menghindarinya, termasuk lewat jalur force-placement yang tidak cek
+# dosen sama sekali.
+LUNCH_BREAK_START = "12:30:00"
+LUNCH_BREAK_END = "13:20:00"
+
+# Dosen laki-laki (is_male=True) DAN beragama Islam TIDAK dijadwalkan pada
+# periode yang overlap jam ini di hari Jumat (salat Jumat). Di-block di
+# level DOSEN (bukan ruang) -- dosen lain tetap boleh pakai ruang/jam yang
+# sama. Hanya berlaku utk dosen UTAMA; co-lecturer memang tidak pernah
+# dicek bentrok jadwal sama sekali (lihat CHECK_CONFLICT_FOR_PRIMARY_ONLY).
+FRIDAY_PRAYER_BLOCK_DAY = "FRIDAY"
+FRIDAY_PRAYER_BLOCK_START = "11:00:00"
+FRIDAY_PRAYER_BLOCK_END = "14:00:00"
+FRIDAY_PRAYER_BLOCK_RELIGION = "ISLAM"

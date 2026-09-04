@@ -29,6 +29,7 @@ from . import config as cfg
 from .allocation import find_best_run_with_room, find_room_for_run
 from .matching import theory_and_lab_slots
 from .models import (
+    CohortTracker,
     Course,
     Lecturer,
     LecturerAssignment,
@@ -72,28 +73,6 @@ def _compute_splits(course: Course, rooms: Sequence[Room]) -> int:
     return max(splits_by_room, splits_by_lab, 1)
 
 
-def _day_split_cap(total_needed: int) -> int:
-    """STEP (baru): 'kalau schedule sudah tidak cukup untuk memenuhi
-    sks_count, course_schedule dipecah jadi 2 dengan sisa sks di hari
-    lain, dosen sama'.
-
-    Kalau `total_needed` (sks_count course) termasuk yang wajib
-    diprioritaskan untuk displit (lihat `cfg.PRIORITIZE_DAY_SPLIT_FOR_SKS`,
-    default {3, 4}), batasi maksimal periode yang boleh diambil DALAM SATU
-    HARI jadi `ceil(total_needed / 2)` -- supaya course otomatis kepecah
-    ke 2 hari (dosen yang sama) walaupun hari itu sebenarnya masih cukup
-    periode buat menampung semuanya sekaligus. Ini mencegah 1 hari jadwal
-    dosen habis dipakai 1 course besar (sks 3/4) saja.
-
-    Untuk sks_count di luar set itu, tidak ada batas tambahan (`total_needed`
-    dikembalikan apa adanya -- perilaku lama: ambil sebanyak mungkin dalam
-    1 hari, baru pindah hari kalau memang kehabisan slot).
-    """
-    if total_needed in cfg.PRIORITIZE_DAY_SPLIT_FOR_SKS:
-        return math.ceil(total_needed / 2)
-    return total_needed
-
-
 def _allocate_theory(
     course: Course,
     lecturer: Lecturer,
@@ -102,48 +81,36 @@ def _allocate_theory(
     rooms: Sequence[Room],
     periods: Sequence[Period],
     day_order: Sequence[str],
+    is_slot_free_fn=None,
 ) -> tuple:
     """STEP: 'find suitable schedule' + 'find suitable rooms by capacity'
-    + 'kalau jadwal dosen/hari habis, cari hari lain, dosen tetap sama'
-    + 'kalau sks_count 3/4, prioritaskan split ke hari lain supaya tidak
-    menghabiskan jadwal harian' (lihat `_day_split_cap`).
+    + 'kalau jadwal dosen/hari habis, cari hari lain, dosen tetap sama'.
 
     Return (chunks, remaining) di mana chunks = list of
-    {"day", "periods":[Period,...], "room": Room, "sks_count": int}
-    dan remaining = sisa periode yang TIDAK dapat slot (0 kalau penuh
-    terpenuhi). `sks_count` pada tiap chunk = jumlah periode NYATA yang
-    berhasil dialokasikan untuk chunk (hari) tsb -- dipakai supaya
-    `course_schedules.sks_count` mencerminkan porsi sks course yang benar2
-    ada di hari itu, bukan selalu total sks_count course secara utuh.
+    {"day", "periods":[Period,...], "room": Room} dan remaining = sisa
+    periode yang TIDAK dapat slot (0 kalau penuh terpenuhi).
     """
     chunks = []
     remaining = needed
-    day_cap = _day_split_cap(needed)
     for day in day_order:
         if remaining <= 0:
             break
-        # Batasi permintaan periode di hari ini ke `day_cap` (kalau
-        # sks_count course termasuk yang diprioritaskan displit), supaya
-        # tidak "menghabiskan" seluruh slot harian hanya untuk 1 course.
-        want_this_day = min(remaining, day_cap)
         result = find_best_run_with_room(
             periods,
             day,
-            want_this_day,
+            remaining,
             lecturer,
             rooms,
             min_capacity=per_split_capacity,
             want_lab=False,
             required_specialization_ids=None,
             require_full_length=False,
+            is_slot_free_fn=is_slot_free_fn,
         )
         if result is None:
             continue
-        got = len(result["periods"])
-        chunks.append(
-            {"day": day, "periods": result["periods"], "room": result["room"], "sks_count": got}
-        )
-        remaining -= got
+        chunks.append({"day": day, "periods": result["periods"], "room": result["room"]})
+        remaining -= len(result["periods"])
         if not cfg.ALLOW_THEORY_SPLIT_ACROSS_DAYS:
             break
     return chunks, remaining
@@ -157,6 +124,7 @@ def _allocate_lab(
     rooms: Sequence[Room],
     periods: Sequence[Period],
     day_order: Sequence[str],
+    is_slot_free_fn=None,
 ) -> Optional[dict]:
     """STEP: 'if lab, find suitable lab (6-7 strategy)'. Blok lab harus
     kontigu dalam SATU hari (tidak dipecah lintas hari), prioritas
@@ -174,14 +142,10 @@ def _allocate_lab(
             want_lab=True,
             required_specialization_ids=course.specialization_ids,
             require_full_length=True,
+            is_slot_free_fn=is_slot_free_fn,
         )
         if result is not None:
-            return {
-                "day": day,
-                "periods": result["periods"],
-                "room": result["room"],
-                "sks_count": len(result["periods"]),
-            }
+            return {"day": day, "periods": result["periods"], "room": result["room"]}
         if not cfg.ALLOW_LAB_SPLIT_ACROSS_DAYS:
             continue
     return None
@@ -195,6 +159,7 @@ def _force_placement(
     per_split_capacity: int,
     want_lab: bool,
     spec_ids,
+    is_slot_free_fn=None,
 ) -> List[dict]:
     """Best-effort terakhir kalau BENAR-BENAR tidak ada dosen bebas-bentrok
     yang ketemu: tempatkan begitu saja di hari & ruang pertama yang
@@ -209,6 +174,11 @@ def _force_placement(
     slot penuh jauh lebih besar -- termasuk untuk blok lab yang mesti
     kontigu 1 hari tapi boleh dicoba di hari lain kalau hari pertama
     penuh.
+
+    `is_slot_free_fn` (mis. cek bentrok kohort major/semester) TETAP
+    dicek di sini walau dosennya sendiri tidak diverifikasi -- bentrok
+    kohort itu soal mahasiswa, bukan dosen, jadi berlaku juga ke sesi
+    hasil force-placement.
     """
     chunks: List[dict] = []
     remaining = needed
@@ -229,11 +199,12 @@ def _force_placement(
             for start in range(0, len(periods) - length + 1):
                 window = periods[start : start + length]
                 pids = [p.id for p in window]
-                room = find_room_for_run(rooms, day, pids, per_split_capacity, want_lab, spec_ids)
+                room = find_room_for_run(
+                    rooms, day, pids, per_split_capacity, want_lab, spec_ids,
+                    is_slot_free_fn=is_slot_free_fn,
+                )
                 if room:
-                    chunks.append(
-                        {"day": day, "periods": list(window), "room": room, "sks_count": length}
-                    )
+                    chunks.append({"day": day, "periods": list(window), "room": room})
                     remaining -= length
                     placed_this_day = True
                     break
@@ -256,6 +227,7 @@ def schedule_one_split(
     rooms: Sequence[Room],
     periods: Sequence[Period],
     day_order: Sequence[str],
+    cohort_tracker: Optional[CohortTracker] = None,
 ) -> List[PlannedSession]:
     """Jadwalkan 1 course_index (1 kelas paralel) dari sebuah course:
     cari dosen utama + slot teori (+ blok lab kalau perlu), lalu tempel
@@ -265,8 +237,24 @@ def schedule_one_split(
     Jadwal & ruang tetap diusahakan terbentuk untuk SEMUA porsi (teori
     & lab) walau dosen utama tidak ketemu / tidak bisa dipasang di
     sebagian porsi -- fallback_reason hanya nempel di porsi yang memang
-    tidak dapat dosen ter-verifikasi bebas-bentrok."""
+    tidak dapat dosen ter-verifikasi bebas-bentrok.
+
+    `cohort_tracker`, kalau diisi, mencegah slot yang kohortnya (major +
+    semester, kecuali submajor beda) sudah dipakai course LAIN -- lihat
+    CohortTracker & cfg.ENFORCE_COHORT_CONFLICT."""
     theory_needed, lab_needed = theory_and_lab_slots(course)
+
+    is_slot_free_fn = None
+    if cohort_tracker is not None:
+        is_slot_free_fn = lambda day, pid: cohort_tracker.is_free(
+            day, pid, course.id, course.category_id, course.semester, course.submajor_id
+        )
+
+    def _book_cohort(day: str, period_ids) -> None:
+        if cohort_tracker is None:
+            return
+        for pid in period_ids:
+            cohort_tracker.book(day, pid, course.id, course.category_id, course.semester, course.submajor_id)
 
     primary: Optional[Lecturer] = None
     theory_chunks: List[dict] = []
@@ -279,7 +267,8 @@ def schedule_one_split(
     for candidate in candidates:
         if theory_needed > 0:
             chunks, remaining = _allocate_theory(
-                course, candidate, theory_needed, per_split_capacity, rooms, periods, day_order
+                course, candidate, theory_needed, per_split_capacity, rooms, periods, day_order,
+                is_slot_free_fn=is_slot_free_fn,
             )
             if not chunks:
                 continue  # kandidat ini tidak dapat slot sama sekali, coba berikutnya
@@ -292,7 +281,8 @@ def schedule_one_split(
         theory_remaining = remaining
         if course.is_lab:
             lab_chunk = _allocate_lab(
-                course, candidate, lab_needed, per_split_capacity, rooms, periods, day_order
+                course, candidate, lab_needed, per_split_capacity, rooms, periods, day_order,
+                is_slot_free_fn=is_slot_free_fn,
             )
         break
 
@@ -303,12 +293,14 @@ def schedule_one_split(
             for p in chunk["periods"]:
                 primary.book(chunk["day"], p.id)
             chunk["room"].booked.setdefault(chunk["day"], set()).update(p.id for p in chunk["periods"])
+            _book_cohort(chunk["day"], [p.id for p in chunk["periods"]])
         if lab_chunk:
             for p in lab_chunk["periods"]:
                 primary.book(lab_chunk["day"], p.id)
             lab_chunk["room"].booked.setdefault(lab_chunk["day"], set()).update(
                 p.id for p in lab_chunk["periods"]
             )
+            _book_cohort(lab_chunk["day"], [p.id for p in lab_chunk["periods"]])
         primary.assigned_course_count += 1
 
     no_candidate_reason = (
@@ -321,10 +313,12 @@ def schedule_one_split(
     theory_forced_chunks: List[dict] = []
     if theory_remaining > 0:
         theory_forced_chunks = _force_placement(
-            rooms, periods, day_order, theory_remaining, per_split_capacity, False, None
+            rooms, periods, day_order, theory_remaining, per_split_capacity, False, None,
+            is_slot_free_fn=is_slot_free_fn,
         )
         for chunk in theory_forced_chunks:
             chunk["room"].booked.setdefault(chunk["day"], set()).update(p.id for p in chunk["periods"])
+            _book_cohort(chunk["day"], [p.id for p in chunk["periods"]])
         theory_remaining -= sum(len(c["periods"]) for c in theory_forced_chunks)
     theory_forced_reason = no_candidate_reason if primary is None else cfg.REASON_FORCED_PLACEMENT
 
@@ -336,13 +330,15 @@ def schedule_one_split(
     lab_forced = False
     if course.is_lab and lab_chunk is None:
         forced = _force_placement(
-            rooms, periods, day_order, lab_needed, per_split_capacity, True, course.specialization_ids
+            rooms, periods, day_order, lab_needed, per_split_capacity, True, course.specialization_ids,
+            is_slot_free_fn=is_slot_free_fn,
         )
         if forced:
             lab_chunk = forced[0]
             lab_chunk["room"].booked.setdefault(lab_chunk["day"], set()).update(
                 p.id for p in lab_chunk["periods"]
             )
+            _book_cohort(lab_chunk["day"], [p.id for p in lab_chunk["periods"]])
             lab_forced = True
     lab_forced_reason = no_candidate_reason if primary is None else cfg.REASON_NO_LAB_SLOT
 
@@ -372,74 +368,63 @@ def schedule_one_split(
     sessions: List[PlannedSession] = []
 
     # Sesi teori yang dapat dosen asli, bebas-bentrok -> TIDAK ada fallback.
-    # PENTING: 1 chunk (periode kontigu hasil alokasi 1 hari) -> TEPAT 1
-    # PlannedSession -> 1 baris course_schedules. `period_id` diisi periode
-    # PERTAMA di chunk (titik mulai blok), dan `sks_count` menandakan
-    # berapa banyak periode berturut-turut yang dicakup blok itu (dipakai
-    # di sisi lain untuk menghitung end_time sebenarnya) -- BUKAN membuat
-    # 1 course_schedule terpisah untuk tiap periode di dalam chunk yang
-    # sama.
     for chunk in theory_chunks:
-        session = PlannedSession(
-            course_id=course.id,
-            course_name=course.name,
-            course_index=course_index,
-            day=chunk["day"],
-            period_id=chunk["periods"][0].id,
-            room_id=chunk["room"].id,
-            is_lab_block=False,
-            sks_count=chunk["sks_count"],
-        )
-        session.lecturer_assignments.append(
-            LecturerAssignment(role_index=0, lecturer_id=primary.id, fallback_reason=None)
-        )
-        session.lecturer_assignments.extend(extra_lecturers)
-        sessions.append(session)
+        for p in chunk["periods"]:
+            session = PlannedSession(
+                course_id=course.id,
+                course_name=course.name,
+                course_index=course_index,
+                day=chunk["day"],
+                period_id=p.id,
+                room_id=chunk["room"].id,
+                is_lab_block=False,
+                sks_count=course.sks_count,
+            )
+            session.lecturer_assignments.append(
+                LecturerAssignment(role_index=0, lecturer_id=primary.id, fallback_reason=None)
+            )
+            session.lecturer_assignments.extend(extra_lecturers)
+            sessions.append(session)
 
     # Sesi teori hasil paksa (dosen tidak ter-verifikasi bebas-bentrok)
-    # -> lecturer_id None + fallback_reason. Sama seperti di atas: 1 chunk
-    # -> 1 PlannedSession, period_id = periode pertama di chunk.
+    # -> lecturer_id None + fallback_reason.
     for chunk in theory_forced_chunks:
-        session = PlannedSession(
-            course_id=course.id,
-            course_name=course.name,
-            course_index=course_index,
-            day=chunk["day"],
-            period_id=chunk["periods"][0].id,
-            room_id=chunk["room"].id,
-            is_lab_block=False,
-            sks_count=chunk["sks_count"],
-        )
-        session.lecturer_assignments.append(
-            LecturerAssignment(role_index=0, lecturer_id=None, fallback_reason=theory_forced_reason)
-        )
-        session.lecturer_assignments.extend(extra_lecturers)
-        sessions.append(session)
+        for p in chunk["periods"]:
+            session = PlannedSession(
+                course_id=course.id,
+                course_name=course.name,
+                course_index=course_index,
+                day=chunk["day"],
+                period_id=p.id,
+                room_id=chunk["room"].id,
+                is_lab_block=False,
+                sks_count=course.sks_count,
+            )
+            session.lecturer_assignments.append(
+                LecturerAssignment(role_index=0, lecturer_id=None, fallback_reason=theory_forced_reason)
+            )
+            session.lecturer_assignments.extend(extra_lecturers)
+            sessions.append(session)
 
     if course.is_lab and lab_chunk:
         lab_lecturer_id = primary.id if (primary is not None and not lab_forced) else None
         lab_reason = None if lab_lecturer_id is not None else lab_forced_reason
-        session = PlannedSession(
-            course_id=course.id,
-            course_name=course.name,
-            course_index=course_index,
-            day=lab_chunk["day"],
-            period_id=lab_chunk["periods"][0].id,
-            room_id=lab_chunk["room"].id,
-            is_lab_block=True,
-            # PENTING: beda dgn teori -- utk blok lab, backend SUDAH punya
-            # konvensi tetap "1 course_schedule lab = LAB_BLOCK_SKS_EQUIVALENT
-            # (3) schedule slot berturut-turut dari period_id start", jadi
-            # `sks_count` yang disimpan harus tetap 1 (bukan jumlah periode
-            # nyata yang dicakup blok itu). Backend yang mengekspansi 1 jadi
-            # 3 schedule sendiri saat dibaca.
-            sks_count=1,
-        )
-        session.lecturer_assignments.append(
-            LecturerAssignment(role_index=0, lecturer_id=lab_lecturer_id, fallback_reason=lab_reason)
-        )
-        session.lecturer_assignments.extend(extra_lecturers)
-        sessions.append(session)
+        for p in lab_chunk["periods"]:
+            session = PlannedSession(
+                course_id=course.id,
+                course_name=course.name,
+                course_index=course_index,
+                day=lab_chunk["day"],
+                period_id=p.id,
+                room_id=lab_chunk["room"].id,
+                is_lab_block=True,
+                sks_count=course.sks_count,
+            )
+            session.lecturer_assignments.append(
+                LecturerAssignment(role_index=0, lecturer_id=lab_lecturer_id, fallback_reason=lab_reason)
+            )
+            session.lecturer_assignments.extend(extra_lecturers)
+            sessions.append(session)
         # kalau lab_chunk None: blok lab benar2 tidak dapat ruang/slot sama
         # sekali (bahkan force-placement gagal, misal tidak ada ruang lab
         # sama sekali yang muat di hari manapun) -- tidak ada course_schedule
@@ -456,6 +441,7 @@ def schedule_course(
     rooms: Sequence[Room],
     periods: Sequence[Period],
     day_order: Sequence[str],
+    cohort_tracker: Optional[CohortTracker] = None,
 ) -> List[PlannedSession]:
     """STEP: 'auto scale rooms for course split ... can be assigned to
     different lecturer'. Hitung jumlah course_index (kelas paralel) lalu
@@ -469,6 +455,9 @@ def schedule_course(
         label = cfg.COURSE_INDEX_LABELS[i] if i < len(cfg.COURSE_INDEX_LABELS) else str(i)
         rotated = list(candidates[i:]) + list(candidates[:i])
         sessions.extend(
-            schedule_one_split(course, label, per_split_capacity, rotated, rooms, periods, day_order)
+            schedule_one_split(
+                course, label, per_split_capacity, rotated, rooms, periods, day_order,
+                cohort_tracker=cohort_tracker,
+            )
         )
     return sessions

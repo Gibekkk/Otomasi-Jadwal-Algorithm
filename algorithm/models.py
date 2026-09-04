@@ -53,6 +53,12 @@ class Lecturer:
     booked: Dict[str, Set[str]] = field(default_factory=dict)
     assigned_course_count: int = 0
 
+    # Dipakai KHUSUS utk aturan "dosen laki-laki + Islam tidak dijadwalkan
+    # Jumat jam sholat" -- lihat generator.py (pre-booking sebelum loop
+    # course jalan) & cfg.FRIDAY_PRAYER_BLOCK_*.
+    is_male: bool = False
+    religion: str = ""
+
     def schedule_count(self) -> Optional[int]:
         """None berarti 'unlimited' (dosen full time). Untuk DLB: total
         slot periode yang tersedia, dijumlah dari SEMUA hari."""
@@ -107,6 +113,69 @@ class Course:
     is_interdiscipline: bool
     category_id: str
     specialization_ids: Set[str] = field(default_factory=set)
+
+    # Dipakai KHUSUS utk aturan "1 kohort (major+semester) tidak boleh
+    # bentrok jadwal" -- lihat CohortTracker & cfg.ENFORCE_COHORT_CONFLICT.
+    # submajor_id=None -> course ini tidak terikat submajor tertentu.
+    semester: int = 0
+    submajor_id: Optional[str] = None
+
+
+@dataclass
+class CohortTracker:
+    """Melacak slot (day, period_id) yang sudah dipakai per 'kohort'
+    mahasiswa (major + semester + submajor), supaya 2 course DI KOHORT
+    YANG SAMA tidak dijadwalkan bentrok waktu -- mahasiswa yang sama
+    tidak mungkin ikut 2 kelas sekaligus. Lihat cfg.ENFORCE_COHORT_CONFLICT
+    utk toggle & penjelasan aturan lengkap.
+
+    Aturan bentrok:
+      - HANYA berlaku kalau category_id-nya "major" sungguhan (ada di
+        `prodi_category_ids`, dari categories.is_prodi = 1).
+      - Major + semester sama -> BENTROK, KECUALI submajor_id beda (None
+        dianggap "beda" dari submajor_id manapun yang terisi).
+      - Split course_index dari course yang SAMA (course_id sama) TIDAK
+        dianggap bentrok satu sama lain.
+    """
+
+    prodi_category_ids: Set[str] = field(default_factory=set)
+    _booked: Dict[str, List[tuple]] = field(default_factory=dict)
+
+    def _conflicts(self, entry: tuple, other: tuple) -> bool:
+        course_id_a, cat_a, sem_a, sub_a = entry
+        course_id_b, cat_b, sem_b, sub_b = other
+        if course_id_a == course_id_b:
+            return False
+        if cat_a not in self.prodi_category_ids or cat_b not in self.prodi_category_ids:
+            return False
+        if cat_a != cat_b or sem_a != sem_b:
+            return False
+        return sub_a == sub_b
+
+    def is_free(
+        self,
+        day: str,
+        period_id: str,
+        course_id: str,
+        category_id: str,
+        semester: int,
+        submajor_id: Optional[str],
+    ) -> bool:
+        key = f"{day}|{period_id}"
+        entry = (course_id, category_id, semester, submajor_id)
+        return all(not self._conflicts(entry, other) for other in self._booked.get(key, []))
+
+    def book(
+        self,
+        day: str,
+        period_id: str,
+        course_id: str,
+        category_id: str,
+        semester: int,
+        submajor_id: Optional[str],
+    ) -> None:
+        key = f"{day}|{period_id}"
+        self._booked.setdefault(key, []).append((course_id, category_id, semester, submajor_id))
 
 
 @dataclass
