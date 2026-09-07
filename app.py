@@ -198,9 +198,10 @@ def start_generate():
             "Menjalankan algoritma generate jadwal untuk timeline_generation_id=%s",
             timeline_generation_id,
         )
-        result = generate_timeline(conn, timeline_generation_id, commit=True)
+        # result = generate_timeline(conn, timeline_generation_id, commit=True)
+        sleep(60)  # Simulasi generate lama
         conn.commit()
-        logger.info("Generate selesai: %s", result.as_dict())
+        # logger.info("Generate selesai: %s", result.as_dict())
 
         callback_status = notify_generate_complete(new_secret)
 
@@ -208,7 +209,7 @@ def start_generate():
             "message": "Generate selesai",
             "freeTableId": free_table_id,
             "timelineGenerationId": timeline_generation_id,
-            "generateResult": result.as_dict(),
+            # "generateResult": result.as_dict(),
             "generateCompleteStatus": callback_status,
         }), 200
 
