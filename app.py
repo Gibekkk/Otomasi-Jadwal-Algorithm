@@ -37,6 +37,7 @@ Konfigurasi lewat .env (lihat .env.example).
 import hashlib
 import logging
 import os
+from time import sleep
 import uuid
 
 import pymysql
@@ -44,7 +45,7 @@ import requests
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 
-from algorithm import generate_timeline
+from algorithm.main import generate_timeline
 
 load_dotenv()
 
@@ -87,7 +88,7 @@ def find_free_table_by_secret(conn, secret_key):
     with conn.cursor() as cursor:
         cursor.execute(
             "SELECT id, is_generating, secret_key, timeline_generation_id "
-            "FROM free_tables WHERE secret_key = %s LIMIT 1",
+            "from .free_tables WHERE secret_key = %s LIMIT 1",
             (secret_key,),
         )
         return cursor.fetchone()
@@ -148,7 +149,22 @@ def notify_generate_stopped(free_table_id, timeline_generation_id, secret_key, e
         logger.error("Gagal fetch %s: %s", url, exc)
         return None
 
-
+def get_timeline_is_odd(conn, timeline_generation_id):
+    with conn.cursor() as cursor:
+        cursor.execute(
+            "SELECT is_odd FROM timeline_generations WHERE id = %s LIMIT 1",
+            (timeline_generation_id,)
+        )
+        row = cursor.fetchone()
+        
+        if row is not None:
+            val = row["is_odd"]
+            # Konversi dari bytes b'\x01' ke boolean jika diperlukan
+            if isinstance(val, bytes):
+                return ord(val) == 1
+            return bool(val)
+        return None
+    
 @app.post("/startGenerate")
 def start_generate():
     body = request.get_json(silent=True) or {}
@@ -181,15 +197,17 @@ def start_generate():
                 "message": "free_table ini belum terhubung ke timeline_generation"
             }), 400
 
-        # Rotasi secret key & COMMIT SEKARANG (di awal, SEBELUM algoritma
-        # generate jalan) -- bukan dibundel dengan commit hasil generate di
-        # akhir seperti sebelumnya. Efeknya: secretKey lama langsung tidak
-        # valid begitu generate DIMULAI, bukan baru setelah generate (yang
-        # bisa berjalan lama) selesai -- caller lain tidak bisa numpang
-        # start generate lagi pakai secretKey yang sama selagi proses masih
-        # jalan. Konsekuensinya, kalau generate di bawah gagal, secretKey
-        # LAMA tidak bisa dipakai retry lagi -- pakai `new_secret` (lihat
-        # notify_generate_stopped) untuk retry.
+        # AMBIL DATA IS_ODD DI SINI
+        is_odd = get_timeline_is_odd(conn, timeline_generation_id)
+        
+        if is_odd is None:
+            return jsonify({
+                "message": "Data timeline_generation tidak ditemukan di database"
+            }), 404
+            
+        logger.info("Timeline ID: %s | is_odd: %s", timeline_generation_id, is_odd)
+
+        # Rotasi secret key & COMMIT SEKARANG
         new_secret = rotate_secret_key(conn, free_table_id)
         conn.commit()
         logger.info("Secret key dirotasi & di-commit di awal (sebelum generate jalan)")
@@ -198,8 +216,10 @@ def start_generate():
             "Menjalankan algoritma generate jadwal untuk timeline_generation_id=%s",
             timeline_generation_id,
         )
-        # result = generate_timeline(conn, timeline_generation_id, commit=True)
-        sleep(60)  # Simulasi generate lama
+        
+        # SEKARANG ANDA BISA MEMASUKKAN is_odd KE DALAM ALGORITMA
+        result = generate_timeline(timeline_generation_id, is_odd)
+        # sleep(60)  # Simulasi generate lama
         conn.commit()
         # logger.info("Generate selesai: %s", result.as_dict())
 
