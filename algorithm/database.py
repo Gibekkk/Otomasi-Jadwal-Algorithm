@@ -3,34 +3,38 @@
 import os
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.orm import declarative_base
+from sqlalchemy.orm import sessionmaker, declarative_base
 
-# 1. Muat environment variables dari file .env
+from pymysql.constants import FIELD_TYPE
+from pymysql.converters import conversions
+
 load_dotenv()
 
-# 2. Ambil nilai-nilai database dari environment variables
 DB_USER = os.getenv("DB_USER")
 DB_PASS = os.getenv("DB_PASS")
 DB_HOST = os.getenv("DB_HOST")
 DB_PORT = os.getenv("DB_PORT")
 DB_NAME = os.getenv("DB_NAME")
 
-# 3. Rakit URL Database untuk MySQL (menggunakan driver pymysql)
-# Format URL: mysql+pymysql://user:password@host:port/database_name
 SQLALCHEMY_DATABASE_URL = f"mysql+pymysql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
-# 4. Membuat Engine
-# Kita tidak lagi butuh connect_args={"check_same_thread": False} karena itu khusus SQLite
-engine = create_engine(SQLALCHEMY_DATABASE_URL)
+# --- FIX: decode kolom BIT(1) MySQL menjadi int di level driver ---
+def _decode_bit(value: bytes) -> int:
+    # pymysql selalu mengirim BIT sebagai bytes mentah, mis. b'\x00' / b'\x01'
+    return int.from_bytes(value, byteorder="big") if value else 0
 
-# 5. Membuat SessionLocal
+bit_conversions = conversions.copy()
+bit_conversions[FIELD_TYPE.BIT] = _decode_bit
+# -------------------------------------------------------------------
+
+engine = create_engine(
+    SQLALCHEMY_DATABASE_URL,
+    connect_args={"conv": bit_conversions},
+)
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-# 6. Membuat Base Class
 Base = declarative_base()
 
-# 7. Helper Function / Dependency
 def get_db():
     db = SessionLocal()
     try:

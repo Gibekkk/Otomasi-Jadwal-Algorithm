@@ -17,8 +17,9 @@ def generate_timeline(timeline_generation_id, isOdd):
     db = SessionLocal()
     
     try:
-        courses, lecturers, rooms, schedules = filter_data(db, isOdd)
-        print(group_scheduling_data(courses, lecturers, rooms, schedules))
+        courses, lecturers, rooms, labs, schedules, specializations = filter_data(db, isOdd)
+        grouped_course = group_scheduling_data(courses, lecturers, rooms, labs, schedules, specializations)
+        print(len(grouped_course), "Groups")
 
     except Exception as e:
         print(f"Terjadi kesalahan saat pemrosesan data: {e}")

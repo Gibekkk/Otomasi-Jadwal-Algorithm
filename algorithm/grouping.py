@@ -1,106 +1,134 @@
-# grouping.py
-
 import logging
 from collections import defaultdict
-from typing import TYPE_CHECKING
+from math import floor
 
-if TYPE_CHECKING:
-    from .models.course import Course
-    from .models.lecturer import Lecturer
-    from .models.room import Room
+from .models.specialization import *
+from .models.category import *
+from .models.course import *
+from .models.room import *
+from .models.lecturer import *
+from .models.schedule import *
+from .splitter import *
 
 logger = logging.getLogger("grouping")
 
+# Lecturer Grouping Logic
+def count_lecturer_specializations_priority(course_specializations, lecturer_specializations) -> int:
+    target = len(course_specializations)
+    suitable_specializations_count = len([spec for spec in course_specializations if spec in lecturer_specializations])
+    match = suitable_specializations_count / target * 100 if target > 0 else 0
+    return floor(match)
 
+def set_lecturer_priority_rates(course: "Course", lecturer: "Lecturer", isInterdiciplinary: bool) -> int:
+    course_specializations = [cs.specialization for cs in course.courseSpecializations]
+    lecturer_specializations = [ls.specialization for ls in lecturer.lecturerSpecializations]
+    if not any(spec in course_specializations for spec in lecturer_specializations):
+        return 0
+    else:
+        priority_rate = 0
+        priority_rate += count_lecturer_specializations_priority(course_specializations, lecturer_specializations)
+        if len(lecturer.lecturerSchedules) > 0: priority_rate += 1
+        if isInterdiciplinary: priority_rate *= -1
+        return int(priority_rate)
+
+
+# Room Grouping Logic
+def set_room_priority_rates(course: "Course", room: "Room") -> int:
+    priority_rate = 0
+    priority_rate += (course.capacity - room.capacity)
+    return int(priority_rate)
+
+
+# Lab Grouping Logic
+def count_lab_specializations_priority(course_specializations, lab_specializations) -> int:
+    suitable_specializations_count = len([spec for spec in course_specializations if spec in lab_specializations])
+    match = suitable_specializations_count - len(lab_specializations)
+    return int(match)
+
+def set_lab_priority_rates(course: "Course", lab: "Room", specializations_count: int) -> int:
+    course_specializations = [cs.specialization for cs in course.courseSpecializations]
+    lab_specializations = [ls.specialization for ls in lab.labGroup.labSpecializations]
+    if not any(spec in course_specializations for spec in lab_specializations):
+        return 0
+    else:
+        priority_rate = specializations_count
+        priority_rate += count_lab_specializations_priority(course_specializations, lab_specializations)
+        return int(priority_rate)
+
+
+# Main Function
 def group_scheduling_data(
     courses: list["Course"],
     lecturers: list["Lecturer"],
     rooms: list["Room"],
-    schedules: list[dict],
-) -> dict:
-    """
-    Transforms SQLAlchemy ORM objects (Course, Lecturer, Room -- loaded with
-    their relationships, e.g. via db.query(Course).all()) into a grouped map
-    keyed by course_id.
-
-    Specialization data is read straight off the ORM relationships:
-      - course.courseSpecializations
-      - lecturer.lecturerSpecializations
-      - room.labGroup.labSpecializations
-    so there's no need to pass in separate join-table lists.
-
-    lecturer_availabilities and schedules are still plain dicts (e.g. from a
-    raw DictCursor/Core query), since there's no ORM model for them yet.
-    Expected keys: 'lecturer_id', 'day', 'schedule_id' / 'id'.
-    """
-
-    # 1. Build O(1) lookup tables
-    lecturer_avail_map = defaultdict(list)
-
-    # 2. Main Grouping Logic
-    grouped_data = {}
-
+    labs: list["Room"],
+    schedules: list["Schedule"],
+    specializations: list["Specialization"],
+):
+    if not courses:
+        logger.warning("No courses available for grouping.")
+        return
+    if not lecturers:
+        logger.warning("No lecturers available for grouping.")
+        return
+    if not rooms:
+        logger.warning("No rooms available for grouping.")
+        return
+    
+    grouped_courses = []
     for course in courses:
-        c_id = course.id
-        c_specs = {cs.specializationId for cs in course.courseSpecializations}
-
-        is_lab_course = bool(course.isLab)
-        is_interdiscipline_course = bool(course.isInterdiscipline)
-
-        # -- A. Map Eligible Rooms --
-        eligible_rooms = []
-        for room in rooms:
-            if room.capacity < course.capacity:
-                continue  # Skip rooms that are too small
-
-            if is_lab_course:
-                if room.labGroup is None:
-                    continue
-
-                # Check if the room's lab group supports ANY of the course's specializations
-                room_lab_specs = {
-                    ls.specializationId for ls in room.labGroup.labSpecializations
-                }
-
-                if c_specs & room_lab_specs:
-                    eligible_rooms.append(room)
-            else:
-                # Standard theory courses need rooms WITHOUT a lab group
-                if room.labGroup is None:
-                    eligible_rooms.append(room)
-
-        # -- B. Map Eligible Lecturers --
-        eligible_lecturers = []
+        suitable_lecturers = []
+        suitable_rooms = []
+        suitable_labs_by_specialization = []
+        suitable_labs = []
+        expected_room = False
+        expected_lab = False
+        index = "A"
+        
         for lecturer in lecturers:
-            is_l_interdiscipline = bool(lecturer.isInterdiscipline)
-
-            # Must match category OR both must allow interdiscipline
-            match_category = lecturer.categoryId == course.categoryId
-            match_inter = is_interdiscipline_course and is_l_interdiscipline
-
-            if match_category or match_inter:
-                l_specs = {
-                    ls.specializationId for ls in lecturer.lecturerSpecializations
-                }
-
-                # If course requires specializations, lecturer must possess AT LEAST ONE
-                matched_specs = c_specs & l_specs
-                has_matching_spec = bool(matched_specs) if c_specs else True
-
-                if has_matching_spec:
-                    eligible_lecturers.append({
-                        "lecturer_id": lecturer.id,
-                        "name": lecturer.name,
-                        "matched_specializations": list(matched_specs),
-                        "available_timeslots": lecturer_avail_map.get(lecturer.id, []),
-                    })
-
-        # -- C. Final Payload Assembly --
-        grouped_data[c_id] = {
-            "course": course,
-            "required_specializations": list(c_specs),
-            "eligible_rooms": eligible_rooms,
-            "eligible_lecturers": eligible_lecturers,
-        }
-
-    return grouped_data
+            isInterdiciplinary = lecturer.categoryId != course.categoryId and lecturer.isInterdiscipline
+            priority_rate = set_lecturer_priority_rates(course, lecturer, isInterdiciplinary)
+            if priority_rate == 0:
+                continue
+            else:
+                suitable_lecturers.append((lecturer, priority_rate))
+        
+        if (course.isLab and course.sksCount > 1) or not course.isLab:
+            expected_room = True
+            for room in rooms:
+                if room.capacity < course.capacity:
+                    continue
+                else:
+                    priority_rate = set_room_priority_rates(course, room)
+                    suitable_rooms.append((room, priority_rate))
+            if len(suitable_rooms) > 0:
+                grouped_courses.append([course, index, suitable_lecturers, suitable_rooms, False])
+        
+        if course.isLab:
+            expected_lab = True
+            for lab in labs:
+                priority_rate_lab = set_lab_priority_rates(course, lab, len(specializations))
+                if priority_rate_lab == 0:
+                    continue
+                else:
+                    suitable_labs_by_specialization.append((lab, priority_rate_lab))
+                    
+                if lab.capacity < course.capacity:
+                    continue
+                else:
+                    priority_rate = set_room_priority_rates(course, lab)
+                    suitable_labs.append((lab, priority_rate, priority_rate_lab))
+            if len(suitable_labs) > 0:
+                grouped_courses.append([course, index, suitable_lecturers, suitable_labs, True])
+        
+        # print(f"Course: {course.name} ({"Lab" if course.isLab else "Regular"}), Suitable Lecturers: {[f'{lecturer.name} ({priority_rate})' for lecturer, priority_rate in suitable_lecturers]}, Suitable Rooms: {[f'{room.name} ({priority_rate})' for room, priority_rate in suitable_rooms]} ({'Expected' if expected_room else 'Not Expected'}), Suitable Labs: {[f'{lab.name} ({priority_rate}, {priority_rate_lab})' for lab, priority_rate, priority_rate_lab in suitable_labs]} ({'Expected' if expected_lab else 'Not Expected'})")
+        if (expected_room and not suitable_rooms) or (expected_lab and not suitable_labs):
+            if not (expected_lab and not suitable_labs_by_specialization):
+                split_courses = split_room_course(course, rooms, suitable_labs_by_specialization)
+                for split_course in split_courses:
+                    split_course_course, split_course_index, split_course_room, isLab = split_course
+                    grouped_courses.append([split_course_course, split_course_index, split_course_room, isLab])
+            else:
+                logger.warning(f"Course {course.name} has no suitable rooms or labs available. It will be removed from scheduling.")
+            
+    return grouped_courses

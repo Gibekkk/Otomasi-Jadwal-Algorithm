@@ -56,6 +56,14 @@ def get_active_lecturers(db):
     
     return lecturers
 
+def get_active_specializations(db):
+    specializations = db.query(Specialization).filter(
+        # 1. Filter untuk tabel Specialization (Aktif dan tidak dihapus)
+        Specialization.deletedAt.is_(None),
+    ).all()
+    
+    return specializations
+
 def get_regular_rooms(db):
     rooms = db.query(Room).filter(
         Room.deletedAt.is_(None),
@@ -74,10 +82,12 @@ def get_labs(db):
         Room.labGroupId.is_not(None),
         
         # 2. Pastikan LabGroup (master lab) juga belum dihapus
-        LabGroup.deletedAt.is_(None)
+        LabGroup.deletedAt.is_(None),
+        
+        # 3. Pastikan labSpecializations TIDAK KOSONG (memiliki minimal 1 relasi)
+        LabGroup.labSpecializations.any()
     ).options(
         # Tarik semua data relasinya sekaligus (Eager Loading Berantai)
-        # Room -> LabGroup -> LabSpecialization -> Specialization
         joinedload(Room.labGroup)
         .joinedload(LabGroup.labSpecializations)
         .joinedload(LabSpecialization.specialization)
@@ -111,6 +121,8 @@ def get_all_rooms(db):
 def filter_data(db, isOdd):
     courses = get_active_courses(db, isOdd)
     lecturers = get_active_lecturers(db)
-    rooms = get_all_rooms(db)
+    rooms = get_regular_rooms(db)
+    labs = get_labs(db)
     schedules = db.query(Schedule).all()
-    return courses, lecturers, rooms, schedules
+    specializations = get_active_specializations(db)
+    return courses, lecturers, rooms, labs, schedules, specializations

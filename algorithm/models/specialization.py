@@ -13,3 +13,4 @@ class Specialization(Base):
 
     courseSpecializations = relationship("CourseSpecialization", backref="specialization")
     lecturerSpecializations = relationship("LecturerSpecialization", backref="specialization")
+    labSpecializations = relationship("LabSpecialization", backref="specialization")
