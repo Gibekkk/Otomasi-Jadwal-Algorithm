@@ -127,7 +127,7 @@ def group_scheduling_data(
                 split_courses = split_room_course(course, rooms, suitable_labs_by_specialization)
                 for split_course in split_courses:
                     split_course_course, split_course_index, split_course_room, isLab = split_course
-                    grouped_courses.append([split_course_course, split_course_index, split_course_room, isLab])
+                    grouped_courses.append([split_course_course, split_course_index, suitable_lecturers, split_course_room, isLab])
             else:
                 logger.warning(f"Course {course.name} has no suitable rooms or labs available. It will be removed from scheduling.")
             
