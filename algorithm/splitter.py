@@ -45,23 +45,25 @@ def split_room_course(
         
     while target > capacity_covered_lab and expecting_lab:
         prev_room, prev_capacity = suitable_labs[0][0], suitable_labs[0][0].capacity
-        lab_capacity = prev_capacity
+        biggest_room_capacity = floor(rooms[0].capacity + (rooms[0].capacity * tolerance_percentation / 100))
+        lab_capacity = prev_capacity if prev_capacity < biggest_room_capacity else biggest_room_capacity
         for lab in suitable_labs:
             if (prev_capacity > (target - capacity_covered_lab)):
                 prev_room, prev_capacity = lab[0], lab[0].capacity
             else:
                 break
         resulted_courses.append([course, indexes[split_count], prev_room, True])
-        lab_capacity = prev_capacity
+        lab_capacity = prev_capacity if prev_capacity < biggest_room_capacity else biggest_room_capacity
         
-        prev_room, prev_capacity = rooms[0], rooms[0].capacity
-        for room in rooms:
-            if prev_capacity > lab_capacity:
-                prev_room, prev_capacity = room, room.capacity
-            else:
-                break
-        resulted_courses.append([course, indexes[split_count], prev_room, False])
-        capacity_covered_lab += prev_capacity
+        if expecting_room:
+            prev_room, prev_capacity = rooms[0], rooms[0].capacity
+            for room in rooms:
+                if prev_capacity > lab_capacity:
+                    prev_room, prev_capacity = room, room.capacity
+                else:
+                    break
+            resulted_courses.append([course, indexes[split_count], prev_room, False])
+        capacity_covered_lab += lab_capacity
         split_count += 1
         
     return resulted_courses
