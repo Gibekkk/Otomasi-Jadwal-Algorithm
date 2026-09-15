@@ -62,7 +62,6 @@ def group_scheduling_data(
     lecturers: list["Lecturer"],
     rooms: list["Room"],
     labs: list["Room"],
-    schedules: list["Schedule"],
     specializations: list["Specialization"],
 ):
     if not courses:

@@ -10,6 +10,7 @@ from .database import SessionLocal
 
 from .filter import *
 from .grouping import *
+from .schedule_controller import *
 
 
 def display_grouped_courses(grouped_course):
@@ -52,29 +53,23 @@ def display_grouped_courses(grouped_course):
         else:
             print("    Dosen yang cocok      : -")
 
-        if isinstance(suitable_rooms_or_labs, list):
-            # Beberapa opsi ruangan/lab, masing-masing dengan skor prioritas
-            if suitable_rooms_or_labs:
-                if isLab:
-                    room_str = ", ".join(
-                        f"{room.name} (prio: {priority}, prio_lab: {priority_lab})"
-                        for room, priority, priority_lab in suitable_rooms_or_labs
-                    )
-                    label = "Lab yang cocok        "
-                else:
-                    room_str = ", ".join(
-                        f"{room.name} (prio: {priority})"
-                        for room, priority in suitable_rooms_or_labs
-                    )
-                    label = "Ruangan yang cocok    "
-                print(f"    {label}: {room_str}")
+        # Beberapa opsi ruangan/lab, masing-masing dengan skor prioritas
+        if suitable_rooms_or_labs:
+            if isLab:
+                room_str = ", ".join(
+                    f"{room.name} (prio: {priority}, prio_lab: {priority_lab})"
+                    for room, priority, priority_lab in suitable_rooms_or_labs
+                )
+                label = "Lab yang cocok        "
             else:
-                print("    Ruangan/Lab yang cocok: -")
+                room_str = ", ".join(
+                    f"{room.name} (prio: {priority})"
+                    for room, priority in suitable_rooms_or_labs
+                )
+                label = "Ruangan yang cocok    "
+            print(f"    {label}: {room_str}")
         else:
-            # Satu ruangan/lab yang sudah terpilih langsung untuk course ini
-            room = suitable_rooms_or_labs
-            label = "Lab terpilih          " if isLab else "Ruangan terpilih      "
-            print(f"    {label}: {room.name} (kapasitas: {room.capacity})")
+            print("    Ruangan/Lab yang cocok: -")
 
     print("\n" + "=" * 60)
 
@@ -86,10 +81,12 @@ def generate_timeline(timeline_generation_id, isOdd):
 
     try:
         courses, lecturers, rooms, labs, schedules, specializations = filter_data(db, isOdd)
-        grouped_course = group_scheduling_data(courses, lecturers, rooms, labs, schedules, specializations)
-        print(len(grouped_course), "Groups")
+        grouped_courses = group_scheduling_data(courses, lecturers, rooms, labs, specializations)
+        print(len(grouped_courses), "Groups")
 
-        display_grouped_courses(grouped_course)
+        display_grouped_courses(grouped_courses)
+        
+        plan_schedules(grouped_courses, schedules)
 
     except Exception as e:
         print(f"Terjadi kesalahan saat pemrosesan data: {e}")
