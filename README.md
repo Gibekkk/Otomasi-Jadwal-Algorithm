@@ -1,61 +1,248 @@
-# startGenerate service
+# Otomasi Jadwal — Algorithm Service (`startGenerate`)
 
-Local-only server, port 8082, satu endpoint: `POST /startGenerate`.
+Microservice Python yang menjalankan **algoritma penjadwalan kuliah** untuk sistem Otomasi Jadwal. Service ini **local-only** (hanya bisa diakses dari host tempat ia berjalan), dipicu oleh backend Java (**Otomasi-Jadwal-Backend**) setiap kali admin menekan tombol "Generate Jadwal", dan mengembalikan notifikasi selesai lewat callback HTTP ke backend tersebut.
 
-## Jalan manual (tanpa Docker)
+---
 
-```bash
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env   # isi sesuai DB & Java backend
-python app.py
+## Daftar Isi
+
+- [Peran dalam Sistem](#peran-dalam-sistem)
+- [Tech Stack](#tech-stack)
+- [Struktur Proyek](#struktur-proyek)
+- [Arsitektur Algoritma](#arsitektur-algoritma)
+- [Kontrak API](#kontrak-api)
+- [Integrasi dengan Backend Java](#integrasi-dengan-backend-java)
+- [Keterbatasan & Catatan Implementasi Saat Ini](#keterbatasan--catatan-implementasi-saat-ini)
+- [Prasyarat](#prasyarat)
+- [Konfigurasi Environment](#konfigurasi-environment)
+- [Cara Menjalankan](#cara-menjalankan)
+- [Deployment / CI-CD](#deployment--cicd)
+- [Roadmap](#roadmap)
+
+---
+
+## Peran dalam Sistem
+
+Backend Java (**Otomasi-Jadwal-Backend**) tidak menghitung jadwal kuliah sendiri. Saat admin memicu proses generate, backend Java memanggil service ini secara asynchronous, dan komputasi penjadwalan yang sesungguhnya (pencocokan dosen, ruangan/lab, dan slot waktu) dijalankan sepenuhnya di sini — dipisah dari proses backend utama agar tidak membebani proses tersebut.
+
+Service ini membaca dan menulis langsung ke **database MariaDB yang sama** dengan backend Java, lewat model SQLAlchemy yang dipetakan ke tabel yang identik dengan entity JPA di backend (`categories`, `courses`, `lecturers`, `rooms`, `schedules`, `specializations`, dst).
+
+---
+
+## Tech Stack
+
+| Komponen | Teknologi |
+|---|---|
+| Bahasa & Runtime | Python 3.12 |
+| Web framework | Flask 3.x |
+| ORM | SQLAlchemy 2.x (query data akademik untuk algoritma) |
+| Akses DB langsung | PyMySQL (validasi & rotasi `secret_key`, di luar SQLAlchemy) |
+| HTTP client | `requests` (callback ke backend Java) |
+| Konfigurasi | `python-dotenv` |
+| WSGI server (produksi) | Gunicorn — lihat [catatan](#keterbatasan--catatan-implementasi-saat-ini) |
+| Container | Docker + Docker Compose |
+| CI/CD | Jenkins (`Jenkinsfile`) |
+
+---
+
+## Struktur Proyek
+
+```
+Otomasi-Jadwal-Algorithm/
+├── app.py                        # Entry point Flask, endpoint POST /startGenerate
+├── requirements.txt
+├── Dockerfile
+├── docker-compose.yml
+├── Jenkinsfile
+├── .env.example
+└── algorithm/
+    ├── database.py                # Engine & session SQLAlchemy (koneksi terpisah dari app.py)
+    ├── main.py                    # generate_timeline() — orkestrator utama algoritma
+    ├── filter.py                  # Module 1 — ambil & filter data akademik aktif dari DB
+    ├── grouping.py                # Module 2 — kelompokkan course dengan kandidat dosen & ruangan/lab
+    ├── splitter.py                # Helper — pecah kapasitas course ke beberapa ruangan/lab
+    ├── schedule_controller.py     # Module 5 — orkestrasi prioritas & pairing lab/non-lab
+    ├── lecturer_scheduler.py      # Module 3 — penjadwalan course prioritas (dosen dulu, baru ruangan)
+    ├── room_scheduler.py          # Module 4 — penjadwalan course non-prioritas (ruangan dulu, baru dosen)
+    ├── scheduling_common.py       # State bersama module 3 & 4 (cegah double-booking)
+    ├── lecturer_schedule.py       # Berkas lama, sudah digantikan lecturer_scheduler.py (lihat catatan)
+    └── models/                    # Model SQLAlchemy: category, course, lecturer, room, schedule, specialization
 ```
 
-## Jalan via Docker
+---
 
-```bash
-cp .env.example .env   # isi sesuai server
-docker compose up -d --build
+## Arsitektur Algoritma
+
+Proses generate jadwal (`algorithm.main.generate_timeline`) berjalan dalam beberapa tahap berurutan:
+
+1. **Module 1 — Filter (`filter.py`)**: mengambil data mata kuliah, dosen, ruangan, lab, dan spesialisasi yang aktif dari database, sesuai semester ganjil/genap (`isOdd`) yang diminta.
+2. **Module 2 — Grouping (`grouping.py`)**: untuk tiap mata kuliah, menghitung skor kecocokan (*priority rate*) terhadap kandidat dosen (berdasarkan spesialisasi) dan kandidat ruangan/lab (berdasarkan kapasitas & spesialisasi), lalu memecah course berkapasitas besar ke beberapa ruangan/lab lewat `splitter.py` bila perlu.
+3. **Module 5 — Orkestrasi (`schedule_controller.py`)**:
+   - Memisahkan course yang tidak punya ruangan/lab sama sekali (di-skip), course *prioritas* (kandidat dosen utamanya sudah punya hari komitmen tetap), dan sisanya (*non-prioritas*).
+   - Mengurutkan tiap kelompok dari jumlah kandidat dosen paling sedikit ("most-constrained-first").
+   - Memasangkan entri ruangan biasa & lab dari course+index yang sama (harus diampu dosen yang sama).
+4. **Module 3 — Lecturer Scheduler (`lecturer_scheduler.py`)**: menghabiskan course prioritas dengan strategi *dosen dulu, baru cari slot & ruangan*.
+5. **Module 4 — Room Scheduler (`room_scheduler.py`)**: memproses course non-prioritas dengan strategi *ruangan/lab dulu, baru cari dosen yang kosong di slot tersebut*.
+6. Module 3 & 4 berbagi objek `SchedulingState` (`scheduling_common.py`) yang sama, sehingga dosen atau ruangan yang sama tidak pernah dibooking dobel pada slot (hari + jam) yang sama, apa pun jalur pemrosesannya.
+
+Hasil akhir tiap tahap adalah struktur data di memori (`course_schedules`, `unscheduled`) — lihat [Keterbatasan](#keterbatasan--catatan-implementasi-saat-ini) untuk status persistensinya ke database.
+
+---
+
+## Kontrak API
+
+Satu-satunya endpoint HTTP yang diekspos:
+
+### `POST /startGenerate`
+
+**Request:**
+```json
+{ "secretKey": "<nilai kolom secret_key di tabel free_tables>" }
 ```
 
-`docker-compose.yml` publish port dengan `127.0.0.1:8082:8082` -- HANYA
-bisa diakses dari host itu sendiri, tidak dari luar. Jangan ubah jadi
-`8082:8082` saja (itu bind ke semua interface / bisa diakses dari luar).
+**Alur pemrosesan:**
+1. Validasi `secretKey` terhadap kolom `free_tables.secret_key`. Tidak cocok → `401`.
+2. Ambil `timeline_generation_id` & `is_odd` terkait dari `free_tables` / `timeline_generations`.
+3. Rotasi `secret_key` (UUID baru di-hash SHA-256) dan **commit langsung saat itu juga**, sebelum algoritma dijalankan — supaya `secretKey` lama langsung tidak berlaku sejak generate dimulai, bukan baru setelah generate (yang bisa berjalan lama) selesai.
+4. Jalankan `algorithm.generate_timeline(timeline_generation_id, is_odd)`.
+5. Kirim `secret_key` baru (raw text, header `Content-Type: text/plain`) ke backend Java: `POST {JAVA_BASE_URL}{API_PREFIX}/timeline/generateComplete`.
+6. Response `200` berisi ringkasan (`freeTableId`, `timelineGenerationId`, status callback).
 
-## Deploy via Jenkins
-
-`Jenkinsfile` build image lalu `docker compose up -d` di agent (agent =
-server tujuan deploy, karena service ini local-only).
-
-Env per-server disimpan sebagai Jenkins credential jenis **Secret file**
-(isi file = isi `.env`), lalu di-inject lewat parameter `ENV_CREDENTIAL_ID`
-(default `startgenerate-env`). Buat credential berbeda untuk tiap
-environment (mis. `startgenerate-env-staging`, `startgenerate-env-prod`)
-kalau perlu.
-
-## Request
-
+**Contoh:**
 ```bash
 curl -X POST http://127.0.0.1:8082/startGenerate \
   -H "Content-Type: application/json" \
   -d '{"secretKey": "<secret dari kolom secret_key di free_tables>"}'
 ```
 
-## Syarat
+**Syarat data:**
+- Kolom `secret_key` (VARCHAR) harus ada di tabel `free_tables`.
+- `free_tables` yang dipakai harus sudah terhubung ke sebuah `timeline_generation_id` yang valid.
 
-- Kolom `secret_key` (VARCHAR) harus ada di tabel `free_tables` (sudah
-  ditambahkan di `FreeTable.java`).
-- `JAVA_ADMIN_USERNAME` / `JAVA_ADMIN_PASSWORD` di `.env` harus akun dengan
-  role SuperAdmin/BaaAdmin/ProdiAdmin, dipakai service ini login ke
-  `{JAVA_BASE_URL}{API_PREFIX}/auth/login` untuk dapat Token.
+---
 
-## Alur
+## Integrasi dengan Backend Java
 
-1. Validasi `secretKey` terhadap `free_tables.secret_key`.
-2. Kalau valid: rotasi `secret_key` (UUID baru di-hash SHA-256), sleep
-   `GENERATE_SLEEP_SECONDS` detik (simulasi generate).
-3. Login sebagai admin, lalu POST secret key baru (raw text) + header
-   `Token` ke `{JAVA_BASE_URL}{API_PREFIX}/timeline/generateComplete`.
-   Endpoint itu yang men-set `is_generating = false` di backend Java.
-4. Kalau secretKey tidak valid: balas 401.
+| Arah | Endpoint | Keterangan |
+|---|---|---|
+| Java → service ini | `POST http://startgenerate-service:8082/startGenerate` | Dipicu backend Java secara asynchronous saat admin generate jadwal. |
+| Service ini → Java | `POST {JAVA_BASE_URL}{API_PREFIX}/timeline/generateComplete` | Dipanggil setelah proses generate selesai, membawa `secret_key` baru sebagai body plain text. Endpoint ini yang men-set `is_generating = false` di backend Java. |
+| Service ini → Java | `POST {JAVA_BASE_URL}{API_PREFIX}/timeline/stopGenerate` | Dipanggil saat terjadi error database di tengah proses. **Lihat catatan di bawah.** |
+
+> **Catatan kontrak `stopGenerate`:** path dan payload endpoint ini masih berupa asumsi pada kode (`GENERATE_STOP_PATH`, dapat dikonfigurasi lewat env var) dan belum tentu benar-benar tersedia di `TimelineController` backend Java. Sebelum mengandalkan notifikasi kegagalan ini di production, pastikan endpoint tersebut memang diimplementasikan pada backend Java, atau sesuaikan path/payload di `notify_generate_stopped()` agar cocok dengan kontrak yang sebenarnya.
+
+---
+
+## Keterbatasan & Catatan Implementasi Saat Ini
+
+Bagian ini mendokumentasikan kondisi implementasi terkini secara transparan, supaya tidak menimbulkan asumsi keliru saat dipakai atau dikembangkan lebih lanjut:
+
+1. **Hasil generate belum dipersist ke database.** `schedule_controller.plan_schedules()` dan module 3/4 hanya menghasilkan struktur data di memori (`course_schedules`, `unscheduled`); belum ada langkah yang menulis hasil tersebut ke tabel jadwal akhir. Ini sejalan dengan catatan pada kode itu sendiri yang menyebut "belum ada tabel *course schedule* final di project ini". Backend Java akan tetap menerima notifikasi "generate selesai" meski belum ada jadwal baru yang benar-benar tersimpan.
+2. **Error di dalam algoritma tidak dilaporkan sebagai kegagalan.** `generate_timeline()` menangkap seluruh exception secara internal (`except Exception as e: print(...)`) tanpa melempar ulang, sehingga `app.py` selalu menganggap proses berhasil dan tetap memanggil `generateComplete` — jalur `notify_generate_stopped()` di `app.py` pada praktiknya hanya akan terpicu oleh kegagalan koneksi database di level `app.py`, bukan oleh kegagalan logika di dalam modul algoritma.
+3. **Kontrak `stopGenerate` ke backend Java masih asumsi** — lihat penjelasan di bagian [Integrasi](#integrasi-dengan-backend-java).
+4. **Variabel environment yang dideklarasikan namun belum dipakai kode:** `JAVA_ADMIN_USERNAME`, `JAVA_ADMIN_PASSWORD`, dan `GENERATE_SLEEP_SECONDS` ada di `.env.example`, tetapi tidak direferensikan di `app.py` maupun modul algoritma saat ini (tidak ada proses login ke backend Java, dan simulasi `sleep()` dalam kode sudah dinonaktifkan/di-hardcode, bukan dibaca dari env).
+5. **`Dockerfile` menjalankan `gunicorn`, tetapi `gunicorn` tidak terdaftar di `requirements.txt`.** Build/jalankan image tanpa menambahkan dependensi ini terlebih dulu akan gagal saat container start.
+6. **`algorithm/lecturer_schedule.py` adalah berkas peninggalan** dari versi sebelum `lecturer_scheduler.py` di-refactor untuk berbagi `scheduling_common.py`; berkas ini tidak lagi di-import di mana pun dan aman untuk dihapus.
+
+---
+
+## Prasyarat
+
+- **Python 3.12**
+- **MariaDB** — database yang sama dengan yang dipakai backend Java (Otomasi-Jadwal-Backend)
+- **Backend Java (Otomasi-Jadwal-Backend)** berjalan dan dapat diakses, untuk menerima callback `generateComplete`
+- **Docker & Docker Compose** — opsional, untuk menjalankan lewat container
+
+---
+
+## Konfigurasi Environment
+
+Salin `.env.example` menjadi `.env`:
+
+```env
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_NAME=jadwal
+DB_USER=root
+DB_PASS=
+
+JAVA_BASE_URL=http://localhost:8080
+API_PREFIX=/api/v1
+
+JAVA_ADMIN_USERNAME=
+JAVA_ADMIN_PASSWORD=
+
+GENERATE_SLEEP_SECONDS=10
+
+SERVER_HOST=127.0.0.1
+SERVER_PORT=8082
+```
+
+| Variabel | Keterangan |
+|---|---|
+| `DB_HOST` / `DB_PORT` / `DB_NAME` / `DB_USER` / `DB_PASS` | Kredensial database MariaDB — **harus mengarah ke database yang sama** dengan backend Java. |
+| `JAVA_BASE_URL` | Base URL backend Java, dipakai untuk callback `generateComplete` / `stopGenerate`. |
+| `API_PREFIX` | Prefix API backend Java (default `/api/v1`). |
+| `JAVA_ADMIN_USERNAME` / `JAVA_ADMIN_PASSWORD` | Dideklarasikan untuk kebutuhan login ke backend Java, **belum digunakan pada kode saat ini** (lihat [Keterbatasan](#keterbatasan--catatan-implementasi-saat-ini)). |
+| `GENERATE_SLEEP_SECONDS` | Dideklarasikan untuk simulasi durasi generate, **belum dibaca oleh kode saat ini**. |
+| `SERVER_HOST` / `SERVER_PORT` | Host & port Flask/Gunicorn. Default `127.0.0.1:8082` (local-only). |
+
+---
+
+## Cara Menjalankan
+
+Service ini didesain **local-only** — tidak dimaksudkan untuk diakses langsung dari luar host tempatnya berjalan.
+
+### Opsi A — Manual (tanpa Docker)
+
+```bash
+python -m venv venv
+source venv/bin/activate      # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+cp .env.example .env          # sesuaikan isinya dengan DB & backend Java
+python app.py
+```
+
+Server akan berjalan di `http://127.0.0.1:8082` (mode Flask development server).
+
+### Opsi B — Docker Compose
+
+```bash
+cp .env.example .env          # sesuaikan isinya
+docker compose up -d --build
+```
+
+`docker-compose.yml` mem-publish port sebagai **`127.0.0.1:8082:8082`** — hanya bisa diakses dari host itu sendiri (loopback), bukan dari jaringan luar. **Jangan** mengubahnya menjadi `8082:8082` saja, karena itu akan mem-bind ke semua interface dan membuka akses dari luar host.
+
+Service juga tergabung ke Docker network eksternal `jadwal-network`, network yang sama dengan container backend Java, supaya dapat dipanggil lewat nama container (`startgenerate-service`).
+
+> Sebelum menjalankan lewat Docker, tambahkan `gunicorn` ke `requirements.txt` — lihat [Keterbatasan](#keterbatasan--catatan-implementasi-saat-ini) poin 5.
+
+### Verifikasi Service Berjalan
+
+```bash
+curl -X POST http://127.0.0.1:8082/startGenerate \
+  -H "Content-Type: application/json" \
+  -d '{"secretKey": "test"}'
+```
+
+Response `401` (`"Secret key tidak valid"`) berarti service sudah aktif dan berhasil terhubung ke database (bukan error koneksi). Response `200` menandakan generate berhasil dipicu.
+
+---
+
+## Deployment / CI-CD
+
+Pipeline (`Jenkinsfile`) menjalankan: **Checkout → Build Docker Image → Simpan image sebagai `.tar.gz` → Transfer via SCP/SSH ke server tujuan → Deploy dengan `docker compose up -d`**, diikuti health-check otomatis ke `/startGenerate` di server tujuan. Environment per-server disimpan sebagai Jenkins credential jenis *Secret file* (isi = isi `.env`), di-inject lewat parameter `ENV_CREDENTIAL_ID` (default `startgenerate-env`) — gunakan credential terpisah untuk tiap environment (mis. `startgenerate-env-staging`, `startgenerate-env-prod`).
+
+Karena service ini *local-only*, agent Jenkins yang menjalankan tahap deploy diasumsikan **adalah** (atau memiliki akses SSH langsung ke) server tujuan.
+
+---
+
+## Roadmap
+
+- [ ] Menambahkan langkah persistensi hasil generate (`course_schedules`) ke database — belum ada tabel/skema final untuk ini.
+- [ ] Melempar ulang (bukan menelan) exception dari `generate_timeline()` agar kegagalan algoritma benar-benar terdeteksi oleh `app.py` dan dilaporkan lewat `stopGenerate`.
+- [ ] Mengonfirmasi/menyelaraskan kontrak endpoint `stopGenerate` dengan backend Java.
+- [ ] Menambahkan `gunicorn` ke `requirements.txt`.
+- [ ] Menghapus `algorithm/lecturer_schedule.py` yang sudah tidak terpakai.
+- [ ] Menangani `unscheduled` (course yang gagal dijadwalkan) lewat re-splitting ruangan/lab atau re-grouping dosen (disebut sebagai TODO pada `schedule_controller.py`).
