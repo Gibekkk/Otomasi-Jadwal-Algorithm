@@ -30,6 +30,15 @@ bit_conversions[FIELD_TYPE.BIT] = _decode_bit
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL,
     connect_args={"conv": bit_conversions},
+    # pool_pre_ping: proses generate bisa berjalan lama; tanpa ini koneksi
+    # yang sudah keburu diputus server MySQL (wait_timeout) baru ketahuan
+    # saat query berikutnya dan menggagalkan seluruh generate.
+    pool_pre_ping=True,
+    # Daur ulang koneksi sebelum menyentuh wait_timeout default MySQL (8 jam);
+    # 1 jam aman untuk sebagian besar konfigurasi.
+    pool_recycle=3600,
+    pool_size=5,
+    max_overflow=10,
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

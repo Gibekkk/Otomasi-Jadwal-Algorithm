@@ -9,6 +9,7 @@ from .models.lecturer import *
 from .models.schedule import *
 from .lecturer_scheduler import schedule_priority_courses
 from .room_scheduler import schedule_non_priority_courses
+from .scheduling_common import SchedulingState
 
 logger = logging.getLogger("schedule_controller")
 
@@ -137,6 +138,14 @@ def plan_schedules(
     grouped_courses,
     schedules: list["Schedule"]
 ):
+    # group_scheduling_data() bisa mengembalikan list kosong (mis. tidak ada
+    # course/dosen/ruangan aktif sama sekali). Ditangani di sini supaya
+    # pemanggil tetap menerima struktur return yang sama dan tidak perlu
+    # mengecek None.
+    if not grouped_courses:
+        logger.warning("Tidak ada grouped course untuk dijadwalkan.")
+        return {"course_schedules": [], "unscheduled": [], "state": SchedulingState()}
+
     removal_indexes, priority_courses, non_priority_courses = _split_priority(grouped_courses)
 
     if removal_indexes:

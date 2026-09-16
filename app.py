@@ -37,7 +37,6 @@ Konfigurasi lewat .env (lihat .env.example).
 import hashlib
 import logging
 import os
-from time import sleep
 import uuid
 
 import pymysql
@@ -88,7 +87,7 @@ def find_free_table_by_secret(conn, secret_key):
     with conn.cursor() as cursor:
         cursor.execute(
             "SELECT id, is_generating, secret_key, timeline_generation_id "
-            "from .free_tables WHERE secret_key = %s LIMIT 1",
+            "FROM free_tables WHERE secret_key = %s LIMIT 1",
             (secret_key,),
         )
         return cursor.fetchone()
@@ -217,11 +216,13 @@ def start_generate():
             timeline_generation_id,
         )
         
-        # SEKARANG ANDA BISA MEMASUKKAN is_odd KE DALAM ALGORITMA
+        # generate_timeline() memakai session SQLAlchemy-nya sendiri dan
+        # commit hasilnya di sana (lihat algorithm/main.py). Kalau gagal,
+        # dia rollback lalu MELEMPAR exception -- ditangkap handler di
+        # bawah, yang akan memanggil stopGenerate alih-alih
+        # generateComplete.
         result = generate_timeline(timeline_generation_id, is_odd)
-        # sleep(60)  # Simulasi generate lama
-        conn.commit()
-        # logger.info("Generate selesai: %s", result.as_dict())
+        logger.info("Generate selesai: %s", result)
 
         callback_status = notify_generate_complete(new_secret)
 
@@ -229,7 +230,7 @@ def start_generate():
             "message": "Generate selesai",
             "freeTableId": free_table_id,
             "timelineGenerationId": timeline_generation_id,
-            # "generateResult": result.as_dict(),
+            "generateResult": result,
             "generateCompleteStatus": callback_status,
         }), 200
 

@@ -1,98 +1,114 @@
-import sys
-import os
+"""
+main.py -- orkestrator utama algoritma penjadwalan.
 
-# Menyesuaikan path agar bisa mengimpor file dari luar folder
-current_dir = os.path.dirname(os.path.abspath(__file__))
-target_dir = os.path.abspath(os.path.join(current_dir, "../"))
-sys.path.append(target_dir)
+Alur:
+    Module 1 (filter)      -> ambil data akademik aktif
+    Module 2 (grouping)    -> kandidat dosen & ruangan/lab per course
+    Module 5 (controller)  -> prioritas, pairing lab/non-lab, panggil module 3 & 4
+    Module 6 (persistence) -> SIMPAN hasilnya ke database
+
+Dua perubahan penting dibanding versi sebelumnya:
+
+1. Hasil generate sekarang BENAR-BENAR DISIMPAN ke database (module 6).
+   Sebelumnya hasil hanya berupa struktur data di memori, sehingga backend
+   Java menerima notifikasi "generate selesai" padahal tidak ada jadwal
+   baru yang tersimpan.
+
+2. Exception TIDAK LAGI DITELAN. Versi sebelumnya membungkus semuanya
+   dengan `except Exception as e: print(...)` tanpa re-raise, sehingga
+   app.py selalu menganggap proses berhasil dan tetap memanggil
+   generateComplete walau algoritmanya gagal total. Sekarang exception
+   di-rollback lalu dilempar ulang, supaya app.py bisa menangkapnya dan
+   memanggil stopGenerate.
+"""
+
+import logging
 
 from .database import SessionLocal
+from .filter import filter_data
+from .grouping import group_scheduling_data
+from .persistence import save_generated_schedules
+from .schedule_controller import plan_schedules
 
-from .filter import *
-from .grouping import *
-from .schedule_controller import *
+logger = logging.getLogger("algorithm.main")
 
 
-def display_grouped_courses(grouped_course):
+def format_grouped_courses(grouped_courses) -> str:
     """
-    Menampilkan hasil grouped_course ke console dengan format yang mudah dibaca.
+    Ringkasan grouped_courses sebagai teks, untuk logging saat debugging.
 
-    Setiap item pada grouped_course selalu berbentuk:
-        [course, index, suitable_lecturers, suitable_rooms_or_labs, isLab]
-
-    - suitable_lecturers     : list of (lecturer, priority_rate)
-    - suitable_rooms_or_labs : bisa berupa dua bentuk berbeda, tergantung apakah
-      course berhasil dikelompokkan langsung ke beberapa opsi ruangan/lab,
-      atau sudah terpilih satu ruangan/lab tertentu (mis. hasil dari
-      algorithm/splitter.py):
-        1. list of (room, priority_rate)               -> jika bukan lab
-           list of (lab, priority_rate, priority_rate_lab) -> jika lab
-        2. objek Room/lab tunggal (bukan list)          -> satu ruangan/lab
-           yang sudah terpilih untuk course tersebut
+    Sengaja dikembalikan sebagai string (bukan langsung print) dan hanya
+    dipanggil kalau level log DEBUG aktif -- versi sebelumnya selalu
+    mencetak SELURUH detail tiap course ke stdout di setiap run, yang
+    berat dan sangat berisik pada data produksi.
     """
-    if not grouped_course:
-        print("Tidak ada grouped course yang dihasilkan.")
-        return
+    if not grouped_courses:
+        return "Tidak ada grouped course yang dihasilkan."
 
-    print("\n" + "=" * 60)
-    print(f"HASIL GROUPED COURSES ({len(grouped_course)} entri)")
-    print("=" * 60)
-
-    for i, entry in enumerate(grouped_course, start=1):
+    lines = [f"HASIL GROUPED COURSES ({len(grouped_courses)} entri)"]
+    for i, entry in enumerate(grouped_courses, start=1):
         course, index, suitable_lecturers, suitable_rooms_or_labs, isLab = entry
-
-        print(f"\n[{i}] {course.name} ({index}) - {'Lab' if isLab else 'Regular'}")
-        print(f"    Kapasitas dibutuhkan  : {course.capacity}")
-
-        if suitable_lecturers:
-            lecturer_str = ", ".join(
-                f"{lecturer.name} (prio: {priority})"
-                for lecturer, priority in suitable_lecturers
-            )
-            print(f"    Dosen yang cocok      : {lecturer_str}")
-        else:
-            print("    Dosen yang cocok      : -")
-
-        # Beberapa opsi ruangan/lab, masing-masing dengan skor prioritas
-        if suitable_rooms_or_labs:
-            if isLab:
-                room_str = ", ".join(
-                    f"{room.name} (prio: {priority}, prio_lab: {priority_lab})"
-                    for room, priority, priority_lab in suitable_rooms_or_labs
-                )
-                label = "Lab yang cocok        "
-            else:
-                room_str = ", ".join(
-                    f"{room.name} (prio: {priority})"
-                    for room, priority in suitable_rooms_or_labs
-                )
-                label = "Ruangan yang cocok    "
-            print(f"    {label}: {room_str}")
-        else:
-            print("    Ruangan/Lab yang cocok: -")
-
-    print("\n" + "=" * 60)
+        lines.append(
+            f"[{i}] {course.name} ({index}) - {'Lab' if isLab else 'Regular'} "
+            f"| kapasitas {course.capacity} "
+            f"| {len(suitable_lecturers)} dosen cocok "
+            f"| {len(suitable_rooms_or_labs)} ruangan/lab cocok"
+        )
+    return "\n".join(lines)
 
 
 def generate_timeline(timeline_generation_id, isOdd):
-    print(timeline_generation_id)
-    print(isOdd)
+    """
+    Jalankan seluruh proses generate untuk satu timeline_generation, lalu
+    simpan hasilnya ke database.
+
+    Return dict ringkasan (dipakai app.py untuk response). Melempar
+    exception kalau prosesnya gagal -- caller yang menentukan
+    rollback/notifikasi ke backend Java.
+    """
+    logger.info(
+        "Mulai generate untuk timeline_generation_id=%s (isOdd=%s)",
+        timeline_generation_id, isOdd,
+    )
     db = SessionLocal()
 
     try:
         courses, lecturers, rooms, labs, schedules, specializations = filter_data(db, isOdd)
+        logger.info(
+            "Data dimuat: %d course, %d dosen, %d ruangan, %d lab, %d periode, %d spesialisasi.",
+            len(courses), len(lecturers), len(rooms), len(labs), len(schedules), len(specializations),
+        )
+
+        if not schedules:
+            raise ValueError(
+                "Tabel `schedules` kosong -- tidak ada periode waktu yang bisa dipakai menjadwalkan."
+            )
+
         grouped_courses = group_scheduling_data(courses, lecturers, rooms, labs, specializations)
-        print(len(grouped_courses), "Groups")
+        logger.info("Grouping menghasilkan %d unit penjadwalan.", len(grouped_courses))
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("\n%s", format_grouped_courses(grouped_courses))
 
-        display_grouped_courses(grouped_courses)
-        
-        plan_schedules(grouped_courses, schedules)
+        plan_result = plan_schedules(grouped_courses, schedules)
 
-    except Exception as e:
-        print(f"Terjadi kesalahan saat pemrosesan data: {e}")
+        summary = save_generated_schedules(db, timeline_generation_id, plan_result)
+        db.commit()
+        logger.info("Generate selesai & tersimpan: %s", summary)
+
+        return {
+            "timelineGenerationId": timeline_generation_id,
+            "isOdd": bool(isOdd),
+            "groupedUnits": len(grouped_courses),
+            "scheduled": len(plan_result.get("course_schedules") or []),
+            **summary,
+        }
+
+    except Exception:
+        db.rollback()
+        logger.exception("Generate gagal untuk timeline_generation_id=%s", timeline_generation_id)
+        # Dilempar ulang supaya app.py tahu prosesnya GAGAL dan memanggil
+        # stopGenerate, bukan generateComplete.
+        raise
 
     finally:
         db.close()
-
-if __name__ == "__main__":
-    generate_timeline("generation_id_example", True)

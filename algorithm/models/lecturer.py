@@ -2,6 +2,29 @@ from sqlalchemy import Column, String, DateTime, Boolean, ForeignKey, Enum
 from sqlalchemy.orm import relationship
 from ..database import Base
 
+class LecturerScheduleTime(Base):
+    """
+    Tabel `lecturer_schedules_time`: jam-jam SPESIFIK yang tersedia untuk
+    satu baris lecturer_schedules (yaitu untuk satu dosen di satu hari).
+
+    Sebelumnya tabel ini tidak pernah dibaca kode, sehingga ketersediaan
+    dosen hanya dianggap per-HARI saja -- padahal satu dosen bisa punya
+    jam berbeda-beda di tiap harinya. Lihat
+    scheduling_common.lecturer_availability().
+    """
+
+    __tablename__ = "lecturer_schedules_time"
+
+    id = Column("id", String(255), primary_key=True, index=True)
+
+    lecturerScheduleId = Column(
+        "lecturer_schedule_id", String(255), ForeignKey("lecturer_schedules.id"), nullable=False, index=True
+    )
+    scheduleId = Column(
+        "schedule_id", String(255), ForeignKey("schedules.id"), nullable=False, index=True
+    )
+
+
 class LecturerSchedule(Base):
     __tablename__ = "lecturer_schedules"
 
@@ -16,6 +39,13 @@ class LecturerSchedule(Base):
     
     # Foreign Key ke Lecturer
     lecturerId = Column("lecturer_id", String(255), ForeignKey("lecturers.id"), nullable=False, index=True)
+
+    # Jam-jam spesifik yang tersedia di hari ini
+    scheduleTimes = relationship(
+        "LecturerScheduleTime",
+        backref="lecturerSchedule",
+        cascade="all, delete-orphan",
+    )
 
 class LecturerSpecialization(Base):
     __tablename__ = "lecturer_specializations"

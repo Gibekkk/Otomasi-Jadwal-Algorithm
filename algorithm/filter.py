@@ -1,5 +1,5 @@
 from sqlalchemy import or_
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import joinedload, selectinload
 
 # Wajib import semua model yang ada agar SQLAlchemy bisa membaca relasinya
 from .models.specialization import *
@@ -29,11 +29,16 @@ def get_active_courses(db, isOdd):
             Submajor.deletedAt.is_(None)
         )
     ).options(
-        # Opsional tapi SANGAT disarankan: 
         # joinedload memastikan data category dan submajor ditarik sekalian di query ini.
         # Sehingga saat Anda memanggil course.category.name nanti, Python tidak perlu nge-query database lagi.
         joinedload(Course.category),
-        joinedload(Course.submajor)
+        joinedload(Course.submajor),
+        # WAJIB: grouping.py membaca course.courseSpecializations untuk SETIAP
+        # pasangan (course x lecturer). Tanpa eager load, tiap akses memicu
+        # query lazy-load terpisah -- klasik N+1, dan jadi penyebab utama
+        # lambatnya proses grouping saat datanya banyak.
+        selectinload(Course.courseSpecializations)
+        .joinedload(CourseSpecialization.specialization),
     ).all()
     
     return courses
@@ -49,9 +54,16 @@ def get_active_lecturers(db):
         # 2. Filter untuk tabel Category (Wajib tidak terhapus)
         Category.deletedAt.is_(None)
     ).options(
-        # Opsional: Lakukan Eager Loading jika Anda mendefinisikan relasi 'category' 
-        # di dalam model Lecturer Anda.
-        # joinedload(Lecturer.category)
+        # Sama seperti course: grouping.py & scheduler membaca
+        # lecturer.lecturerSpecializations dan lecturer.lecturerSchedules
+        # berkali-kali per dosen. Tanpa eager load ini, tiap akses jadi
+        # query terpisah (N+1).
+        selectinload(Lecturer.lecturerSpecializations)
+        .joinedload(LecturerSpecialization.specialization),
+        # lecturerSchedules -> scheduleTimes dipakai untuk mengetahui jam
+        # spesifik ketersediaan dosen per hari.
+        selectinload(Lecturer.lecturerSchedules)
+        .selectinload(LecturerSchedule.scheduleTimes),
     ).all()
     
     return lecturers

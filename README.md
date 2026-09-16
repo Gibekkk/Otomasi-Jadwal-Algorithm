@@ -83,9 +83,8 @@ Proses generate jadwal (`algorithm.main.generate_timeline`) berjalan dalam beber
    - Memasangkan entri ruangan biasa & lab dari course+index yang sama (harus diampu dosen yang sama).
 4. **Module 3 — Lecturer Scheduler (`lecturer_scheduler.py`)**: menghabiskan course prioritas dengan strategi *dosen dulu, baru cari slot & ruangan*.
 5. **Module 4 — Room Scheduler (`room_scheduler.py`)**: memproses course non-prioritas dengan strategi *ruangan/lab dulu, baru cari dosen yang kosong di slot tersebut*.
-6. Module 3 & 4 berbagi objek `SchedulingState` (`scheduling_common.py`) yang sama, sehingga dosen atau ruangan yang sama tidak pernah dibooking dobel pada slot (hari + jam) yang sama, apa pun jalur pemrosesannya.
-
-Hasil akhir tiap tahap adalah struktur data di memori (`course_schedules`, `unscheduled`) — lihat [Keterbatasan](#keterbatasan--catatan-implementasi-saat-ini) untuk status persistensinya ke database.
+6. Module 3 & 4 berbagi objek `SchedulingState` (`scheduling_common.py`) yang sama, sehingga dosen atau ruangan yang sama tidak pernah dibooking dobel pada slot (hari + jam) yang sama, apa pun jalur pemrosesannya. Satu sesi menempati **blok periode berurutan** sepanjang `sksCount` — seluruh periode dalam blok itu yang dibooking, bukan hanya periode pertamanya.
+7. **Module 6 — Persistence (`persistence.py`)**: menyimpan hasil penjadwalan ke `course_schedules`, `lectures`, dan `lecture_lecturers`. Hasil generate sebelumnya untuk `timeline_generation_id` yang sama dihapus lebih dulu (urut FK: `lecture_lecturers` → `lectures` → `course_schedules`), supaya generate ulang tidak menumpuk jadwal ganda.
 
 ---
 
@@ -135,14 +134,23 @@ curl -X POST http://127.0.0.1:8082/startGenerate \
 
 ## Keterbatasan & Catatan Implementasi Saat Ini
 
-Bagian ini mendokumentasikan kondisi implementasi terkini secara transparan, supaya tidak menimbulkan asumsi keliru saat dipakai atau dikembangkan lebih lanjut:
+1. **Kontrak `stopGenerate` ke backend Java masih asumsi.** Path & payload endpoint ini (`GENERATE_STOP_PATH`, dapat dikonfigurasi lewat env var) belum dikonfirmasi ada di `TimelineController` backend Java — lihat bagian [Integrasi](#integrasi-dengan-backend-java).
+2. **Pemilihan co-lecturer tidak dicek bentrok.** Untuk course dengan `lecturer_count > 1`, dosen pendamping diambil dari sisa kandidat yang cocok tanpa memeriksa apakah jadwalnya bentrok — hanya dosen **utama** yang dijamin bebas bentrok. Ini disengaja (sesuai aturan "hanya jadwal dosen utama yang tidak boleh bentrok"), tapi perlu diingat saat membaca hasilnya.
+3. **`unscheduled` belum ditangani ulang.** Course yang gagal dijadwalkan dilaporkan lewat log & `unscheduled_count`, tapi belum dicoba ulang lewat re-splitting ruangan/lab atau re-grouping dosen (TODO pada `schedule_controller.py`).
+4. **Variabel environment yang dideklarasikan namun belum dipakai kode:** `JAVA_ADMIN_USERNAME`, `JAVA_ADMIN_PASSWORD`, dan `GENERATE_SLEEP_SECONDS` ada di `.env.example` tetapi tidak direferensikan di kode (tidak ada proses login ke backend Java, dan simulasi `sleep()` sudah dihapus).
+5. **Pembagian porsi lab vs teori memakai asumsi tetap:** course lab dengan `sksCount > 1` dipecah jadi 1 periode blok lab + `sksCount - 1` periode teori (lihat `scheduling_common.session_duration`). Sesuaikan fungsi itu kalau aturan di kampus Anda berbeda.
 
-1. **Hasil generate belum dipersist ke database.** `schedule_controller.plan_schedules()` dan module 3/4 hanya menghasilkan struktur data di memori (`course_schedules`, `unscheduled`); belum ada langkah yang menulis hasil tersebut ke tabel jadwal akhir. Ini sejalan dengan catatan pada kode itu sendiri yang menyebut "belum ada tabel *course schedule* final di project ini". Backend Java akan tetap menerima notifikasi "generate selesai" meski belum ada jadwal baru yang benar-benar tersimpan.
-2. **Error di dalam algoritma tidak dilaporkan sebagai kegagalan.** `generate_timeline()` menangkap seluruh exception secara internal (`except Exception as e: print(...)`) tanpa melempar ulang, sehingga `app.py` selalu menganggap proses berhasil dan tetap memanggil `generateComplete` — jalur `notify_generate_stopped()` di `app.py` pada praktiknya hanya akan terpicu oleh kegagalan koneksi database di level `app.py`, bukan oleh kegagalan logika di dalam modul algoritma.
-3. **Kontrak `stopGenerate` ke backend Java masih asumsi** — lihat penjelasan di bagian [Integrasi](#integrasi-dengan-backend-java).
-4. **Variabel environment yang dideklarasikan namun belum dipakai kode:** `JAVA_ADMIN_USERNAME`, `JAVA_ADMIN_PASSWORD`, dan `GENERATE_SLEEP_SECONDS` ada di `.env.example`, tetapi tidak direferensikan di `app.py` maupun modul algoritma saat ini (tidak ada proses login ke backend Java, dan simulasi `sleep()` dalam kode sudah dinonaktifkan/di-hardcode, bukan dibaca dari env).
-5. **`Dockerfile` menjalankan `gunicorn`, tetapi `gunicorn` tidak terdaftar di `requirements.txt`.** Build/jalankan image tanpa menambahkan dependensi ini terlebih dulu akan gagal saat container start.
-6. **`algorithm/lecturer_schedule.py` adalah berkas peninggalan** dari versi sebelum `lecturer_scheduler.py` di-refactor untuk berbagi `scheduling_common.py`; berkas ini tidak lagi di-import di mana pun dan aman untuk dihapus.
+### Sudah diperbaiki pada versi ini
+
+- **Hasil generate kini disimpan ke database** lewat `persistence.py` (module 6) — sebelumnya hanya struktur data di memori, sehingga backend Java menerima "generate selesai" padahal tidak ada jadwal yang tersimpan.
+- **Error algoritma tidak lagi ditelan.** `generate_timeline()` sekarang rollback lalu melempar ulang exception, sehingga `app.py` benar-benar mendeteksi kegagalan dan memanggil `stopGenerate`, bukan `generateComplete`.
+- **SQL rusak di `app.py` diperbaiki** — query `free_tables` sempat tertulis `from .free_tables` (bukan `FROM free_tables`), yang membuat setiap request gagal.
+- **`Dockerfile` diperbaiki** — baris pertama sempat tertulis `from .python:3.12-slim` (bukan `FROM python:3.12-slim`), yang membuat build gagal.
+- **`gunicorn` ditambahkan ke `requirements.txt`** (dibutuhkan oleh `CMD` di Dockerfile).
+- **Booking kini per-blok, bukan per-periode.** Sebelumnya course 3 SKS hanya membooking 1 periode, sehingga course lain bisa dijadwalkan menimpa jam-jam yang sebenarnya masih terpakai.
+- **Ketersediaan dosen dibaca sampai level jam** lewat tabel `lecturer_schedules_time` yang sebelumnya tidak pernah dibaca kode (ketersediaan hanya dianggap per-hari).
+- **Query N+1 dihilangkan** — `courseSpecializations`, `lecturerSpecializations`, dan `lecturerSchedules` kini di-eager-load; pencocokan spesialisasi memakai `set` id yang dihitung sekali, bukan membangun ulang list di setiap pasangan course × dosen.
+- **`algorithm/lecturer_schedule.py` (berkas mati) dihapus**, dan loop pemrosesan yang terduplikasi di module 3 & 4 disatukan ke `scheduling_pairing.py`.
 
 ---
 
@@ -240,9 +248,6 @@ Karena service ini *local-only*, agent Jenkins yang menjalankan tahap deploy dia
 
 ## Roadmap
 
-- [ ] Menambahkan langkah persistensi hasil generate (`course_schedules`) ke database — belum ada tabel/skema final untuk ini.
-- [ ] Melempar ulang (bukan menelan) exception dari `generate_timeline()` agar kegagalan algoritma benar-benar terdeteksi oleh `app.py` dan dilaporkan lewat `stopGenerate`.
+- [ ] Menangani `unscheduled` (course yang gagal dijadwalkan) lewat re-splitting ruangan/lab atau re-grouping dosen.
 - [ ] Mengonfirmasi/menyelaraskan kontrak endpoint `stopGenerate` dengan backend Java.
-- [ ] Menambahkan `gunicorn` ke `requirements.txt`.
-- [ ] Menghapus `algorithm/lecturer_schedule.py` yang sudah tidak terpakai.
-- [ ] Menangani `unscheduled` (course yang gagal dijadwalkan) lewat re-splitting ruangan/lab atau re-grouping dosen (disebut sebagai TODO pada `schedule_controller.py`).
+- [ ] Mempertimbangkan pengecekan bentrok untuk co-lecturer, kalau aturannya berubah.
